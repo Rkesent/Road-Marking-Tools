@@ -55,102 +55,83 @@ fn calculatePathWidth spline1 spline2 param =
 )
 
 -------
--- 生成单个V字形几何体（使用实际边界点，底部顶点焊接）
+-- 创建单个V字形平面几何体（使用中线+前后辅助线方法）
 -------
-fn createVShapeGeometry centerPos direction leftBoundary rightBoundary vLength lineThick =
+fn createVShapePlane centerPos direction leftBoundary rightBoundary vLength lineThick =
 (
+    -- 步骤1：生成V字形中线骨骼
+    local halfLength = vLength / 2.0
+    local centerBottom = centerPos - direction * halfLength
+    local topPos = centerPos + direction * halfLength
+    
+    -- 确保所有点都在同一Z平面上
+    local baseZ = centerPos.z
+    local leftTop = [leftBoundary.x, leftBoundary.y, baseZ]
+    local rightTop = [rightBoundary.x, rightBoundary.y, baseZ]
+    centerBottom = [centerBottom.x, centerBottom.y, baseZ]
+    
+    -- V字形中线骨骼的三个关键点
+    local centerLine = #(leftTop, centerBottom, rightTop)
+    
+    -- 步骤2：生成前后两条辅助线（为每个点计算正确的局部切线方向）
+    local halfWidth = lineThick / 2.0
+    local frontLine = #()
+    local backLine = #()
+    
+    -- 为每个中心线点计算正确的偏移方向
+    for i = 1 to centerLine.count do
+    (
+        local currentPt = centerLine[i]
+        local tangentDir
+        
+        if i == 1 then
+        (
+            -- 第一个点（leftTop）：使用到下一个点的方向
+            tangentDir = normalize (centerLine[i+1] - currentPt)
+        )
+        else if i == centerLine.count then
+        (
+            -- 最后一个点（rightTop）：使用从上一个点的方向
+            tangentDir = normalize (currentPt - centerLine[i-1])
+        )
+        else
+        (
+            -- 中间点（centerBottom）：使用角平分线方向
+            local inDir = normalize (currentPt - centerLine[i-1])  -- 入射方向
+            local outDir = normalize (centerLine[i+1] - currentPt) -- 出射方向
+            tangentDir = normalize (inDir + outDir)  -- 角平分线方向
+        )
+        
+        -- 计算垂直方向并偏移
+        local perpDir = normalize (cross tangentDir [0,0,1])
+        local frontPt = currentPt + perpDir * halfWidth
+        local backPt = currentPt - perpDir * halfWidth
+        
+        append frontLine frontPt
+        append backLine backPt
+    )
+    
+    -- 步骤3：生成面片数据
     local verts = #()
     local faces = #()
     
-    -- 计算V字形的基本尺寸
-    local halfLength = vLength / 2.0
-    local halfThick = lineThick / 2.0
-    local lineWidth = lineThick * 0.8  -- V字线条的宽度
-    local halfLineWidth = lineWidth / 2.0
+    -- 添加所有顶点（前线 + 后线）
+    for pt in frontLine do append verts pt
+    for pt in backLine do append verts pt
     
-    -- 计算V字形的关键点
-    local centerBottom = centerPos - direction * halfLength  -- V字底部中心点
-    
-    -- 计算V字形顶部位置，使其对齐到边界样条线
-    local topPos = centerPos + direction * halfLength
-    local leftTop = leftBoundary + (topPos.z - leftBoundary.z) * [0,0,1]   -- 左上端点对齐到左边界
-    local rightTop = rightBoundary + (topPos.z - rightBoundary.z) * [0,0,1]  -- 右上端点对齐到右边界
-    
-    -- 计算左臂的方向向量
-    local leftArmDir = normalize (leftTop - centerBottom)
-    local leftArmPerp = normalize (cross leftArmDir [0,0,1])
-    
-    -- 计算右臂的方向向量
-    local rightArmDir = normalize (rightTop - centerBottom)
-    local rightArmPerp = normalize (cross rightArmDir [0,0,1])
-    
-    -- 关键修复：左右臂内侧底部顶点焊接
-    -- 计算左臂和右臂的各个角点
-    local leftBottomOuter = centerBottom - leftArmPerp * halfLineWidth
-    local leftBottomInner = centerBottom + leftArmPerp * halfLineWidth
-    local rightBottomOuter = centerBottom + rightArmPerp * halfLineWidth
-    local rightBottomInner = centerBottom - rightArmPerp * halfLineWidth
-    
-    -- 焊接点：左右臂内侧底点焊接到centerBottom位置
-    local weldedBottomInner = centerBottom  -- 直接使用中心底部点作为焊接点
-    
-    -- 左臂的角点
-    local leftTopInner = leftTop - leftArmPerp * halfLineWidth
-    local leftTopOuter = leftTop + leftArmPerp * halfLineWidth
-    
-    -- 右臂的角点
-    local rightTopInner = rightTop + rightArmPerp * halfLineWidth
-    local rightTopOuter = rightTop - rightArmPerp * halfLineWidth
-    
-    -- 创建底面顶点
-    append verts (weldedBottomInner - [0,0,halfThick])      -- 1: 焊接的内侧底点（底面）
-    append verts (leftBottomOuter - [0,0,halfThick])       -- 2: 左臂外底点（底面）
-    append verts (leftTopOuter - [0,0,halfThick])          -- 3: 左臂外顶点（底面）
-    append verts (leftTopInner - [0,0,halfThick])          -- 4: 左臂内顶点（底面）
-    append verts (rightTopInner - [0,0,halfThick])         -- 5: 右臂内顶点（底面）
-    append verts (rightTopOuter - [0,0,halfThick])         -- 6: 右臂外顶点（底面）
-    append verts (rightBottomOuter - [0,0,halfThick])      -- 7: 右臂外底点（底面）
-    
-    -- 创建顶面顶点
-    append verts (weldedBottomInner + [0,0,halfThick])      -- 8: 焊接的内侧底点（顶面）
-    append verts (leftBottomOuter + [0,0,halfThick])       -- 9: 左臂外底点（顶面）
-    append verts (leftTopOuter + [0,0,halfThick])          -- 10: 左臂外顶点（顶面）
-    append verts (leftTopInner + [0,0,halfThick])          -- 11: 左臂内顶点（顶面）
-    append verts (rightTopInner + [0,0,halfThick])         -- 12: 右臂内顶点（顶面）
-    append verts (rightTopOuter + [0,0,halfThick])         -- 13: 右臂外顶点（顶面）
-    append verts (rightBottomOuter + [0,0,halfThick])      -- 14: 右臂外底点（顶面）
-    
-    -- 创建底面（以共享中心点为中心的扇形面）
-    append faces [1,2,3]    -- 左臂外侧三角形
-    append faces [1,3,4]    -- 左臂内侧三角形
-    append faces [1,4,5]    -- 中间连接三角形
-    append faces [1,5,6]    -- 右臂内侧三角形
-    append faces [1,6,7]    -- 右臂外侧三角形
-    
-    -- 创建顶面（以共享中心点为中心的扇形面）
-    append faces [8,10,9]   -- 左臂外侧三角形
-    append faces [8,11,10]  -- 左臂内侧三角形
-    append faces [8,12,11]  -- 中间连接三角形
-    append faces [8,13,12]  -- 右臂内侧三角形
-    append faces [8,14,13]  -- 右臂外侧三角形
-    
-    -- 创建侧面
-    -- 左臂外侧
-    append faces [2,9,10]; append faces [2,10,3]
-    -- 左臂顶端
-    append faces [3,10,11]; append faces [3,11,4]
-    -- 左臂内侧
-    append faces [4,11,8]; append faces [4,8,1]
-    -- 右臂内侧
-    append faces [1,8,12]; append faces [1,12,5]
-    -- 右臂顶端
-    append faces [5,12,13]; append faces [5,13,6]
-    -- 右臂外侧
-    append faces [6,13,14]; append faces [6,14,7]
-    -- 右臂底部
-    append faces [7,14,8]; append faces [7,8,1]
-    -- 左臂底部
-    append faces [1,8,9]; append faces [1,9,2]
+    -- 生成四边形面片，连接前后两条线
+    local frontCount = frontLine.count
+    for i = 1 to (frontCount - 1) do
+    (
+        local v1 = i                    -- 前线当前点
+        local v2 = i + 1                -- 前线下一点
+        local v3 = frontCount + i + 1   -- 后线下一点
+        local v4 = frontCount + i       -- 后线当前点
+        
+        -- 创建两个三角形组成四边形
+        append faces [v1, v2, v3]
+        append faces [v1, v3, v4]
+    )
     
     return #(verts, faces)
 )
@@ -241,7 +222,7 @@ fn drawTrafficGuidePreview splines vLen vWidth vSpacing lineThick direction =
             )
         )
         
-        -- 计算并绘制V字形位置
+        -- 计算并绘制V字形位置（使用中线+前后辅助线方法）
         local vPositions = calculateVShapePositions spline1 spline2 vLen vSpacing direction
         
         gw.setColor #line tgl_previewColor
@@ -252,44 +233,72 @@ fn drawTrafficGuidePreview splines vLen vWidth vSpacing lineThick direction =
             local leftBoundary = vData[3]
             local rightBoundary = vData[4]
             
-            -- 计算V字形的实际宽度边界进行线框预览
+            -- 使用与createVShapePlane函数完全相同的逻辑
             local halfLength = vLen / 2.0
-            local lineWidth = lineThick * 0.8  -- V字线条的宽度
-            local halfLineWidth = lineWidth / 2.0
-            
-            -- V字形的关键点
             local centerBottom = vPos - vDir * halfLength
             local topPos = vPos + vDir * halfLength
-            local leftTop = leftBoundary + (topPos.z - leftBoundary.z) * [0,0,1]
-            local rightTop = rightBoundary + (topPos.z - rightBoundary.z) * [0,0,1]
             
-            -- 计算左臂和右臂的方向向量和垂直向量
-            local leftArmDir = normalize (leftTop - centerBottom)
-            local leftArmPerp = normalize (cross leftArmDir [0,0,1])
-            local rightArmDir = normalize (rightTop - centerBottom)
-            local rightArmPerp = normalize (cross rightArmDir [0,0,1])
+            -- 确保所有点都在同一Z平面上
+            local baseZ = vPos.z
+            local leftTop = [leftBoundary.x, leftBoundary.y, baseZ]
+            local rightTop = [rightBoundary.x, rightBoundary.y, baseZ]
+            centerBottom = [centerBottom.x, centerBottom.y, baseZ]
             
-            -- 计算左臂的四个边界点
-            local leftArm_p1 = centerBottom - leftArmPerp * halfLineWidth
-            local leftArm_p2 = centerBottom + leftArmPerp * halfLineWidth
-            local leftArm_p3 = leftTop + leftArmPerp * halfLineWidth
-            local leftArm_p4 = leftTop - leftArmPerp * halfLineWidth
+            -- 步骤1：生成V字形中线骨骼
+            local centerLine = #(leftTop, centerBottom, rightTop)
             
-            -- 计算右臂的四个边界点
-            local rightArm_p1 = centerBottom - rightArmPerp * halfLineWidth
-            local rightArm_p2 = centerBottom + rightArmPerp * halfLineWidth
-            local rightArm_p3 = rightTop + rightArmPerp * halfLineWidth
-            local rightArm_p4 = rightTop - rightArmPerp * halfLineWidth
+            -- 步骤2：生成前后两条辅助线（为每个点计算正确的局部切线方向）
+            local halfWidth = lineThick / 2.0
+            local frontLine = #()
+            local backLine = #()
             
-            -- 绘制左臂线框轮廓
-            gw.polyline #(leftArm_p1, leftArm_p2, leftArm_p3, leftArm_p4, leftArm_p1) false
+            -- 为每个中心线点计算正确的偏移方向
+            for i = 1 to centerLine.count do
+            (
+                local currentPt = centerLine[i]
+                local tangentDir
+                
+                if i == 1 then
+                (
+                    -- 第一个点（leftTop）：使用到下一个点的方向
+                    tangentDir = normalize (centerLine[i+1] - currentPt)
+                )
+                else if i == centerLine.count then
+                (
+                    -- 最后一个点（rightTop）：使用从上一个点的方向
+                    tangentDir = normalize (currentPt - centerLine[i-1])
+                )
+                else
+                (
+                    -- 中间点（centerBottom）：使用角平分线方向
+                    local inDir = normalize (currentPt - centerLine[i-1])  -- 入射方向
+                    local outDir = normalize (centerLine[i+1] - currentPt) -- 出射方向
+                    tangentDir = normalize (inDir + outDir)  -- 角平分线方向
+                )
+                
+                -- 计算垂直方向并偏移
+                local perpDir = normalize (cross tangentDir [0,0,1])
+                local frontPt = currentPt + perpDir * halfWidth
+                local backPt = currentPt - perpDir * halfWidth
+                
+                append frontLine frontPt
+                append backLine backPt
+            )
             
-            -- 绘制右臂线框轮廓
-            gw.polyline #(rightArm_p1, rightArm_p2, rightArm_p3, rightArm_p4, rightArm_p1) false
+            -- 绘制前后辅助线
+            gw.setColor #line tgl_previewColor
+            gw.polyline frontLine false  -- 前辅助线
+            gw.polyline backLine false   -- 后辅助线
             
-            -- 绘制V字形中心轮廓线（可选，用于更清晰地显示V字形状）
-            gw.setColor #line (color 200 200 0)  -- 稍暗的黄色
-            gw.polyline #(leftTop, centerBottom, rightTop) false
+            -- 绘制连接线，显示面片结构
+            for i = 1 to frontLine.count do
+            (
+                gw.polyline #(frontLine[i], backLine[i]) false
+            )
+            
+            -- 绘制V字形中心骨架线（用较暗的颜色作为参考）
+            gw.setColor #line (color 150 150 0)  -- 较暗的黄色
+            gw.polyline centerLine false
             gw.setColor #line tgl_previewColor  -- 恢复原色
         )
         
@@ -299,7 +308,7 @@ fn drawTrafficGuidePreview splines vLen vWidth vSpacing lineThick direction =
 )
 
 -------
--- 生成导流线几何体
+-- 生成导流线几何体（使用偏移算法生成平面）
 -------
 fn generateTrafficGuideLine splines vLen vSpacing lineThick direction =
 (
@@ -321,11 +330,12 @@ fn generateTrafficGuideLine splines vLen vSpacing lineThick direction =
         return undefined
     )
     
-    -- 合并所有V字形几何体
+    -- 收集所有V字形的顶点和面
     local allVerts = #()
     local allFaces = #()
     local vertOffset = 0
     
+    -- 为每个V字形位置创建平面几何体
     for vData in vPositions do
     (
         local vPos = vData[1]
@@ -333,26 +343,30 @@ fn generateTrafficGuideLine splines vLen vSpacing lineThick direction =
         local leftBoundary = vData[3]
         local rightBoundary = vData[4]
         
-        -- 创建单个V字形几何体
-        local vGeom = createVShapeGeometry vPos vDir leftBoundary rightBoundary vLen lineThick
-        local verts = vGeom[1]
-        local faces = vGeom[2]
+        -- 创建V字形平面几何体数据
+        local vGeomData = createVShapePlane vPos vDir leftBoundary rightBoundary vLen lineThick
         
-        -- 添加顶点
-        for v in verts do
-            append allVerts v
-        
-        -- 添加面（调整顶点索引）
-        for f in faces do
+        if vGeomData != undefined and vGeomData.count == 2 then
         (
-            local newFace = [f[1] + vertOffset, f[2] + vertOffset, f[3] + vertOffset]
-            append allFaces newFace
+            local vVerts = vGeomData[1]
+            local vFaces = vGeomData[2]
+            
+            -- 添加顶点到总数组
+            for v in vVerts do
+                append allVerts v
+            
+            -- 添加面片（调整顶点索引）
+            for f in vFaces do
+            (
+                local newFace = [f[1] + vertOffset, f[2] + vertOffset, f[3] + vertOffset]
+                append allFaces newFace
+            )
+            
+            vertOffset += vVerts.count
         )
-        
-        vertOffset += verts.count
     )
     
-    -- 创建网格对象
+    -- 创建最终的网格对象
     if allVerts.count > 0 and allFaces.count > 0 then
     (
         local meshObj = mesh vertices:allVerts faces:allFaces
@@ -360,6 +374,8 @@ fn generateTrafficGuideLine splines vLen vSpacing lineThick direction =
         
         -- 转换为可编辑多边形
         convertToMesh meshObj
+        
+        messageBox ("成功生成 " + vPositions.count as string + " 个V字形导流线！") title:"完成"
         
         return meshObj
     )
