@@ -16,8 +16,126 @@ global tgl_previewEnabled = false
 global tgl_vSpacing = 200        -- V字形间距 (mm)
 global tgl_lineThickness = 100    -- 线条粗细 (mm)
 global tgl_vDirection = 1         -- V字形方向 (1=正向, -1=反向)
-global tgl_standardVAngle = 60.0     -- 标准开合角度 (度)
+global tgl_centerOffset = 100.0     -- 中点偏移距离 (单位)
 global tgl_offsetDistance = 500.0   -- 向后偏移距离 (mm)
+global tgl_fixedAngle = 60.0      -- 固定V字形角度 (度)
+global tgl_useFixedAngle = true   -- 是否使用固定角度模式
+global tgl_lastUpdateTime = 0     -- 上次更新时间 (节流用)
+global tgl_previewCache = #()     -- 预览数据缓存
+global tgl_cacheValid = false     -- 缓存是否有效
+global tgl_lastParams = #()       -- 上次计算的参数
+
+-------
+-- 参数比较和缓存管理
+-------
+fn comparePreviewParams currentParams =
+(
+    if tgl_lastParams.count != currentParams.count then
+        return false
+    
+    for i = 1 to currentParams.count do
+    (
+        if tgl_lastParams[i] != currentParams[i] then
+            return false
+    )
+    return true
+)
+
+fn updatePreviewCache splines vSpacing direction centerOffset offsetDistance =
+(
+    local currentParams = #(
+        tgl_useFixedAngle,
+        tgl_fixedAngle,
+        vSpacing,
+        direction,
+        centerOffset,
+        offsetDistance,
+        splines[1].name,  -- 样条线标识
+        splines[2].name
+    )
+    
+    -- 检查参数是否改变
+    if comparePreviewParams currentParams and tgl_cacheValid then
+        return tgl_previewCache
+    
+    -- 参数改变，重新计算缓存
+    tgl_lastParams = currentParams
+    
+    local spline1 = splines[1]
+    local spline2 = splines[2]
+    
+    -- 计算封闭线段数据
+    local intersectionInfo = analyzeSplineIntersection spline1 spline2
+    local startClosureLine = intersectionInfo[2]
+    local closureData = undefined
+    
+    if startClosureLine != undefined then
+    (
+        local offsetData = undefined
+        if offsetDistance > 0 then
+        (
+            local spline1Length = curveLength spline1 1
+            local spline2Length = curveLength spline2 1
+            local offsetParam1 = if spline1Length > 0 then (offsetDistance / spline1Length) else 0.0
+            local offsetParam2 = if spline2Length > 0 then (offsetDistance / spline2Length) else 0.0
+            offsetParam1 = amax 0.0 (amin 1.0 offsetParam1)
+            offsetParam2 = amax 0.0 (amin 1.0 offsetParam2)
+            local projectedStart = lengthInterp spline1 1 offsetParam1
+            local projectedEnd = lengthInterp spline2 1 offsetParam2
+            offsetData = #(projectedStart, projectedEnd)
+        )
+        closureData = #(startClosureLine, offsetData)
+    )
+    
+    -- 计算V字形数据
+    local vPositions = calculateVShapePositions spline1 spline2 vSpacing direction centerOffset
+    local vShapeData = #()
+    
+    for vData in vPositions do
+    (
+        local vPos = vData[1]
+        local vDir = vData[2]
+        local leftBoundary = vData[3]
+        local rightBoundary = vData[4]
+        
+        local pathDirection = if vDir != undefined then vDir else [1,0,0]
+        pathDirection = pathDirection * direction
+        
+        local centerBottom = vPos
+        local leftTop = leftBoundary
+        local rightTop = rightBoundary
+        local baseZ = centerBottom.z
+        
+        local leftTopPreview = [leftTop.x, leftTop.y, baseZ]
+        local rightTopPreview = [rightTop.x, rightTop.y, baseZ]
+        
+        -- 计算centerBottomPreview
+        local centerBottomPreview = undefined
+        if tgl_useFixedAngle then
+        (
+            centerBottomPreview = vPos
+        )
+        else
+        (
+            centerBottomPreview = if centerOffset > 0 then
+                centerBottom + (normalize pathDirection) * centerOffset
+            else
+                centerBottom
+        )
+        
+        if centerBottomPreview != undefined then
+            centerBottomPreview = [centerBottomPreview.x, centerBottomPreview.y, baseZ]
+        
+        -- 存储预览数据
+        append vShapeData #(leftTopPreview, centerBottomPreview, rightTopPreview, centerBottom)
+    )
+    
+    -- 更新缓存
+    tgl_previewCache = #(closureData, vShapeData)
+    tgl_cacheValid = true
+    
+    return tgl_previewCache
+)
 
 -------
 -- 计算边界点（约束在边界线上）
@@ -87,22 +205,66 @@ fn calculateBoundaryPoint centerPos pathDirection boundarySpline fixedAngle isLe
 --   centerPos: V字形中心点位置
 --   pathDirection: 路径方向向量
 --   lineThickness: 线条厚度
---   leftBoundary: 左侧边界点（已约束在边界线上）
---   rightBoundary: 右侧边界点（已约束在边界线上）
+--   leftBoundary: 左侧边界点（用于约束检查）
+--   rightBoundary: 右侧边界点（用于约束检查）
+--   fixedAngle: 固定开合角度（度）
+--   armLength: V字形臂长（可选，默认根据边界点距离计算）
+--   centerOffset: 中心底部顶点沿中心线向上的偏移距离
 -- 返回：V字形网格对象
 -------
-fn createStandardVShape centerPos pathDirection lineThickness leftBoundary rightBoundary =
+fn createStandardVShape centerPos pathDirection lineThickness leftBoundary rightBoundary fixedAngle armLength centerOffset =
 (
     try
     (
-        -- 使用传入的边界点作为V字形端点
-        local leftEnd = leftBoundary
-        local rightEnd = rightBoundary
         local vWidth = if lineThickness != undefined then lineThickness else 2.0
+        
+        -- 计算V字形臂长（如果未指定，使用边界点距离的平均值）
+        local defaultArmLength = if armLength != undefined then armLength else 
+        (
+            local leftDist = distance centerPos leftBoundary
+            local rightDist = distance centerPos rightBoundary
+            (leftDist + rightDist) / 2.0
+        )
+        
+        -- 使用固定角度计算V字形端点，保持几何重心在centerPos
+        local halfAngleRad = degToRad (fixedAngle / 2.0)
+        
+        -- 计算路径方向的垂直向量（用于确定左右方向）
+        local pathDir = normalize pathDirection
+        local perpDir = normalize (cross pathDir [0,0,1])
+        
+        -- 重新计算V字形几何：保持几何重心固定在centerPos
+        -- 几何重心 = (leftEnd + rightEnd) / 2 = centerPos
+        -- 因此：leftEnd = centerPos + offset, rightEnd = centerPos - offset
+        local lateralOffset = perpDir * defaultArmLength * sin halfAngleRad
+        local longitudinalOffset = pathDir * defaultArmLength * cos halfAngleRad
+        
+        -- 计算V字形端点（几何重心固定在centerPos）
+        local leftEnd = centerPos + lateralOffset
+        local rightEnd = centerPos - lateralOffset
+        
+        -- 计算V字形顶点（两臂的交汇点）
+        -- 在固定角度模式下，centerPos已经是调整后的顶点位置
+        local vexPos = if centerOffset != undefined and centerOffset > 0 and not tgl_useFixedAngle then
+            centerPos + (normalize pathDirection) * centerOffset
+        else
+            centerPos  -- 在固定角度模式下，centerPos就是正确的顶点位置
+        
+        -- 边界约束检查：如果计算的端点超出边界点，则调整端点位置
+        local leftBoundaryDist = distance vexPos leftBoundary
+        local rightBoundaryDist = distance vexPos rightBoundary
+        local leftCalcDist = distance vexPos leftEnd
+        local rightCalcDist = distance vexPos rightEnd
+        
+        if leftCalcDist > leftBoundaryDist then
+            leftEnd = leftBoundary
+        if rightCalcDist > rightBoundaryDist then
+            rightEnd = rightBoundary
         
         -- 确保所有点在同一水平面上
         leftEnd.z = centerPos.z
         rightEnd.z = centerPos.z
+        vexPos.z = centerPos.z
         
         -- 计算线条宽度的一半
         local halfWidth = vWidth / 2.0
@@ -113,22 +275,22 @@ fn createStandardVShape centerPos pathDirection lineThickness leftBoundary right
         
         -- 计算V字形的顶点（考虑线条宽度）
         -- 左臂方向和垂直方向
-        local leftArmDir = normalize (leftEnd - centerPos)
+        local leftArmDir = normalize (leftEnd - vexPos)
         local leftPerpDir = normalize (cross leftArmDir [0,0,1])
         
         -- 右臂方向和垂直方向
-        local rightArmDir = normalize (rightEnd - centerPos)
+        local rightArmDir = normalize (rightEnd - vexPos)
         local rightPerpDir = normalize (cross rightArmDir [0,0,1])
         
         -- 左臂的四个顶点
-        append verts (centerPos + leftPerpDir * halfWidth)     -- 1: 左臂内侧底部
-        append verts (centerPos - leftPerpDir * halfWidth)     -- 2: 左臂外侧底部
+        append verts (vexPos + leftPerpDir * halfWidth)     -- 1: 左臂内侧底部
+        append verts (vexPos - leftPerpDir * halfWidth)     -- 2: 左臂外侧底部
         append verts (leftEnd + leftPerpDir * halfWidth)       -- 3: 左臂内侧顶部
         append verts (leftEnd - leftPerpDir * halfWidth)       -- 4: 左臂外侧顶部
         
         -- 右臂的四个顶点
-        append verts (centerPos - rightPerpDir * halfWidth)    -- 5: 右臂内侧底部
-        append verts (centerPos + rightPerpDir * halfWidth)    -- 6: 右臂外侧底部
+        append verts (vexPos - rightPerpDir * halfWidth)    -- 5: 右臂内侧底部
+        append verts (vexPos + rightPerpDir * halfWidth)    -- 6: 右臂外侧底部
         append verts (rightEnd - rightPerpDir * halfWidth)     -- 7: 右臂内侧顶部
         append verts (rightEnd + rightPerpDir * halfWidth)     -- 8: 右臂外侧顶部
         
@@ -151,15 +313,8 @@ fn createStandardVShape centerPos pathDirection lineThickness leftBoundary right
             setFaceMatID vMesh i 1
         )
         
-        -- 移动到指定位置
-        vMesh.pos = centerPos
-        
-        -- 根据方向旋转
-        if direction != undefined then
-        (
-            local dirAngle = atan2 direction.y direction.x
-            rotate vMesh (angleaxis (radToDeg dirAngle) [0,0,1])
-        )
+        -- 设置网格位置（相对于世界坐标原点）
+        vMesh.pos = [0,0,0]
         
         update vMesh
         return vMesh
@@ -447,6 +602,34 @@ fn calculatePathWidth spline1 spline2 param =
 )
 
 -------
+-- 根据中点偏移量计算V字形开合角度
+-- 参数：
+--   centerPos: V字形中心位置
+--   centerDir: 中心线方向
+--   leftBoundary: 左边界点
+--   rightBoundary: 右边界点
+--   offsetDistance: 从中心点沿中心线向上的偏移距离
+-- 返回：计算出的开合角度（度）
+-------
+fn calculateAngleFromOffset centerPos centerDir leftBoundary rightBoundary offsetDistance =
+(
+    -- 计算沿中心线向上偏移后的目标点（centerBottomPreview向上偏移）
+    local targetPoint = centerPos + (normalize centerDir) * offsetDistance
+    
+    -- 计算从目标点到左右边界的向量
+    local toLeft = normalize (leftBoundary - targetPoint)
+    local toRight = normalize (rightBoundary - targetPoint)
+    
+    -- 计算两个向量之间的夹角
+    local dotProduct = dot toLeft toRight
+    dotProduct = amax -1.0 (amin 1.0 dotProduct)  -- 限制在有效范围内
+    local angleRad = acos dotProduct
+    local angleDeg = radToDeg angleRad
+    
+    return angleDeg
+)
+
+-------
 -- 计算V字形中心开合角度
 -------
 fn calculateVShapeAngle leftBoundary rightBoundary centerBottom =
@@ -467,6 +650,186 @@ fn calculateVShapeAngle leftBoundary rightBoundary centerBottom =
     return angleDegrees
 )
 
+-------
+-- 反向计算中心线偏移距离（根据目标角度）
+-- 参数：
+--   centerPos: V字形中心位置
+--   centerDir: 中心线方向
+--   leftBoundary: 左边界点
+--   rightBoundary: 右边界点
+--   targetAngle: 目标开合角度（度）
+--   maxOffset: 最大搜索偏移距离（可选，默认1000）
+-- 返回：实现目标角度所需的中心偏移距离
+-------
+fn calculateOffsetFromAngle centerPos centerDir leftBoundary rightBoundary targetAngle maxOffset:1000.0 =
+(
+    try
+    (
+        -- 二分搜索法寻找最佳偏移距离
+        local minOffset = 0.0
+        local maxSearch = if maxOffset != undefined then maxOffset else 1000.0
+        local tolerance = 0.1  -- 角度误差容差（度）
+        local maxIterations = 20
+        
+        -- 首先检查目标角度是否在可达范围内
+        local minAngle = calculateAngleFromOffset centerPos centerDir leftBoundary rightBoundary 0.0
+        local maxAngle = calculateAngleFromOffset centerPos centerDir leftBoundary rightBoundary maxSearch
+        
+        -- 如果目标角度超出范围，返回边界值
+        if targetAngle >= minAngle then
+            return 0.0
+        if targetAngle <= maxAngle then
+            return maxSearch
+        
+        -- 二分搜索
+        for iteration = 1 to maxIterations do
+        (
+            local midOffset = (minOffset + maxSearch) / 2.0
+            local currentAngle = calculateAngleFromOffset centerPos centerDir leftBoundary rightBoundary midOffset
+            local angleDiff = abs (currentAngle - targetAngle)
+            
+            -- 如果误差在容差范围内，返回结果
+            if angleDiff < tolerance then
+                return midOffset
+            
+            -- 根据角度差异调整搜索范围
+            if currentAngle > targetAngle then
+                minOffset = midOffset
+            else
+                maxSearch = midOffset
+        )
+        
+        -- 返回最接近的结果
+        return (minOffset + maxSearch) / 2.0
+    )
+    catch
+    (
+        print ("calculateOffsetFromAngle 错误: " + getCurrentException())
+        return 0.0
+    )
+)
+
+-------
+-- 角度与偏移距离的数学关系分析函数
+-- 参数：
+--   centerPos: V字形中心位置
+--   centerDir: 中心线方向
+--   leftBoundary: 左边界点
+--   rightBoundary: 右边界点
+--   offsetRange: 偏移距离范围数组，如#(0, 50, 100, 150, 200)
+-- 返回：角度和偏移距离的对应关系数组
+-------
+fn analyzeAngleOffsetRelation centerPos centerDir leftBoundary rightBoundary offsetRange:#(0, 25, 50, 75, 100, 125, 150, 175, 200) =
+(
+    local results = #()
+    
+    for offset in offsetRange do
+    (
+        local angle = calculateAngleFromOffset centerPos centerDir leftBoundary rightBoundary offset
+        append results #(offset, angle)
+        print ("偏移距离: " + offset as string + "mm → 角度: " + (formattedPrint angle format:":.1f") + "°")
+    )
+    
+    return results
+)
+
+-------
+-- 便捷的反向计算函数：根据标准V形角度计算所需偏移
+-- 参数：
+--   centerPos: V字形中心位置  
+--   centerDir: 中心线方向
+--   leftBoundary: 左边界点
+--   rightBoundary: 右边界点
+--   desiredAngle: 期望的V形角度（度）
+-- 返回：实现该角度所需的中心偏移距离
+-------
+fn getOffsetForAngle centerPos centerDir leftBoundary rightBoundary desiredAngle =
+(
+    local result = calculateOffsetFromAngle centerPos centerDir leftBoundary rightBoundary desiredAngle
+    print ("目标角度: " + desiredAngle as string + "° → 需要偏移距离: " + result as string + "mm")
+    return result
+)
+
+-------
+-- 根据固定角度和中点偏移量计算V字形顶点位置
+-- 参数：
+--   centerPos: V字形中心位置
+--   centerDir: 中心线方向
+--   leftBoundary: 左边界点
+--   rightBoundary: 右边界点
+--   fixedAngle: 固定的V字形角度（度）
+--   centerOffset: 中心底部顶点的偏移量
+-- 返回：调整后的V字形顶点位置
+-------
+fn calculateFixedAngleVertexPosition centerPos centerDir leftBoundary rightBoundary fixedAngle centerOffset =
+(
+    try
+    (
+        -- 计算基础的中心顶点位置（沿中心线向上偏移）
+        -- 在固定角度模式下，centerOffset 直接控制顶点偏移
+        local baseVertexPos = centerPos + (normalize centerDir) * centerOffset
+        
+        -- 使用固定角度计算理论上的V字形端点
+        local halfAngleRad = degToRad (fixedAngle / 2.0)
+        local pathDir = normalize centerDir
+        local perpDir = normalize (cross pathDir [0,0,1])
+        
+        -- 计算固定角度下的理论端点方向
+        local leftArmDir = [pathDir.x * cos (-halfAngleRad) - pathDir.y * sin (-halfAngleRad),
+                           pathDir.x * sin (-halfAngleRad) + pathDir.y * cos (-halfAngleRad),
+                           0]
+        local rightArmDir = [pathDir.x * cos halfAngleRad - pathDir.y * sin halfAngleRad,
+                            pathDir.x * sin halfAngleRad + pathDir.y * cos halfAngleRad,
+                            0]
+        
+        -- 计算到边界点的距离
+        local leftDist = distance baseVertexPos leftBoundary
+        local rightDist = distance baseVertexPos rightBoundary
+        local avgDist = (leftDist + rightDist) / 2.0
+        
+        -- 计算理论端点位置
+        local theoreticalLeftEnd = baseVertexPos + leftArmDir * avgDist
+        local theoreticalRightEnd = baseVertexPos + rightArmDir * avgDist
+        
+        -- 检查理论端点是否在边界约束内，如果超出则调整顶点位置
+        local leftBoundaryDist = distance baseVertexPos leftBoundary
+        local rightBoundaryDist = distance baseVertexPos rightBoundary
+        local theoreticalLeftDist = distance baseVertexPos theoreticalLeftEnd
+        local theoreticalRightDist = distance baseVertexPos theoreticalRightEnd
+        
+        -- 如果理论端点超出边界，需要调整顶点位置
+        local adjustmentNeeded = false
+        local adjustmentScale = 1.0
+        
+        if theoreticalLeftDist > leftBoundaryDist then
+        (
+            adjustmentScale = amin adjustmentScale (leftBoundaryDist / theoreticalLeftDist)
+            adjustmentNeeded = true
+        )
+        if theoreticalRightDist > rightBoundaryDist then
+        (
+            adjustmentScale = amin adjustmentScale (rightBoundaryDist / theoreticalRightDist)
+            adjustmentNeeded = true
+        )
+        
+        -- 如果需要调整，重新计算顶点位置
+        if adjustmentNeeded then
+        (
+            -- 向中心位置方向调整顶点
+            local adjustedVertexPos = centerPos + (baseVertexPos - centerPos) * adjustmentScale
+            return adjustedVertexPos
+        )
+        else
+        (
+            return baseVertexPos
+        )
+    )
+    catch
+    (
+        return centerPos
+    )
+)
+
 
 -------
 -- 重新实现的中心模型生成算法
@@ -482,9 +845,10 @@ fn calculateVShapeAngle leftBoundary rightBoundary centerBottom =
 --   lineThickness: 线条厚度
 --   direction: 方向系数
 --   fixedAngle: 固定角度
+--   centerOffset: 中心底部顶点沿中心线向上的偏移距离
 -- 返回：V字形网格对象
 -------
-fn createVShapeModel vPos vDir leftBoundary rightBoundary leftSpline rightSpline lineThickness direction fixedAngle = 
+fn createVShapeModel vPos vDir leftBoundary rightBoundary leftSpline rightSpline lineThickness direction fixedAngle centerOffset = 
 (
 	try
 	(
@@ -502,7 +866,7 @@ fn createVShapeModel vPos vDir leftBoundary rightBoundary leftSpline rightSpline
         -- 使用传入的边界点（已约束在边界线上）
         -- leftBoundary 和 rightBoundary 已经通过参数传入
         
-        local standardVShape = createStandardVShape vPos pathDirection lineThickness leftBoundary rightBoundary
+        local standardVShape = createStandardVShape vPos pathDirection lineThickness leftBoundary rightBoundary fixedAngle undefined centerOffset
         return standardVShape
 	)
 	catch
@@ -522,7 +886,7 @@ fn createVShapeModel vPos vDir leftBoundary rightBoundary leftSpline rightSpline
 --   fixedAngle: 固定角度（度）
 -- 返回：包含位置、方向和边界点的数组
 -------
-fn calculateVShapePositions spline1 spline2 vSpacing direction fixedAngle =
+fn calculateVShapePositions spline1 spline2 vSpacing direction centerOffset =
 (
     local result = #()
     local centerPoints = calculateCenterPath spline1 spline2
@@ -591,7 +955,24 @@ fn calculateVShapePositions spline1 spline2 vSpacing direction fixedAngle =
                                 local leftBoundary = lengthInterp spline1 1 pathParam
                                 local rightBoundary = lengthInterp spline2 1 pathParam
                                 
-                                append result #(vPos, vDir, leftBoundary, rightBoundary, fixedAngle)
+                                -- 根据模式计算V字形角度和顶点位置
+                                local calculatedAngle = 0.0
+                                local adjustedVPos = vPos
+                                
+                                if tgl_useFixedAngle then
+                                (
+                                    -- 固定角度模式：使用全局固定角度，根据偏移量调整顶点位置
+                                    calculatedAngle = tgl_fixedAngle
+                                    adjustedVPos = calculateFixedAngleVertexPosition vPos vDir leftBoundary rightBoundary tgl_fixedAngle centerOffset
+                                )
+                                else
+                                (
+                                    -- 动态角度模式：根据中点偏移量计算角度
+                                    calculatedAngle = calculateAngleFromOffset vPos vDir leftBoundary rightBoundary centerOffset
+                                    adjustedVPos = vPos
+                                )
+                                
+                                append result #(adjustedVPos, vDir, leftBoundary, rightBoundary, calculatedAngle)
                                 exit
                             )
                             
@@ -607,150 +988,55 @@ fn calculateVShapePositions spline1 spline2 vSpacing direction fixedAngle =
 )
 
 -------
--- 预览绘制函数（包含封闭线段和固定角度模式）
+-- 优化的预览绘制函数（使用缓存数据）
 -------
-fn drawTrafficGuidePreview splines vSpacing lineThick direction fixedAngle offsetDistance =
+fn drawTrafficGuidePreview splines vSpacing lineThick direction centerOffset offsetDistance =
 (
     if splines.count >= 2 then
     (
+        -- 获取缓存的预览数据
+        local previewData = updatePreviewCache splines vSpacing direction centerOffset offsetDistance
+        local closureData = previewData[1]
+        local vShapeData = previewData[2]
+        
         gw.setTransform(matrix3 1)
-        gw.setColor #line tgl_previewColor
         
-        local spline1 = splines[1]
-        local spline2 = splines[2]
-        
-        -- 分析起始点重合情况
-        local intersectionInfo = analyzeSplineIntersection spline1 spline2
-        local startIntersect = intersectionInfo[1]
-        local startClosureLine = intersectionInfo[2]
-        
-        -- 绘制封闭线段（仅在起始点未重合时）
-        if startClosureLine != undefined then
+        -- 绘制封闭线段
+        if closureData != undefined then
         (
+            local startClosureLine = closureData[1]
+            local offsetData = closureData[2]
+            
             -- 绘制原始封闭线段
             gw.setColor #line (color 0 255 255)  -- 青色封闭线
             gw.polyline #(startClosureLine[1], startClosureLine[2]) false
             
-            -- 绘制中心偏移线段（沿中心线向后偏移）
-            if offsetDistance > 0 then
+            -- 绘制中心偏移线段
+            if offsetData != undefined then
             (
-                -- 计算两条样条线的整体方向
-                local spline1StartPt = lengthInterp spline1 1 0.0
-                local spline1EndPt = lengthInterp spline1 1 1.0
-                local spline2StartPt = lengthInterp spline2 1 0.0
-                local spline2EndPt = lengthInterp spline2 1 1.0
-                
-                local spline1Dir = normalize (spline1EndPt - spline1StartPt)
-                local spline2Dir = normalize (spline2EndPt - spline2StartPt)
-                local backwardDirection = normalize (spline1Dir + spline2Dir)
-                
-                -- 使用参数化方法计算偏移点（类似V字距离的数学映射）
-                local spline1Length = curveLength spline1 1
-                local spline2Length = curveLength spline2 1
-                
-                -- 将偏移距离转换为样条线参数
-                local offsetParam1 = if spline1Length > 0 then (offsetDistance / spline1Length) else 0.0
-                local offsetParam2 = if spline2Length > 0 then (offsetDistance / spline2Length) else 0.0
-                
-                -- 确保参数在有效范围内
-                offsetParam1 = amax 0.0 (amin 1.0 offsetParam1)
-                offsetParam2 = amax 0.0 (amin 1.0 offsetParam2)
-                
-                -- 直接使用lengthInterp获取精确的偏移点
-                local projectedStart = lengthInterp spline1 1 offsetParam1
-                local projectedEnd = lengthInterp spline2 1 offsetParam2
-                
                 gw.setColor #line (color 255 0 0)  -- 红色中心偏移线段
-                gw.polyline #(projectedStart, projectedEnd) false
+                gw.polyline #(offsetData[1], offsetData[2]) false
             )
         )
         
-        -- 绘制中心路径（调试用）
-        local centerPoints = calculateCenterPath spline1 spline2
-        if centerPoints.count > 1 then
-        (
-            gw.setColor #line (color 100 100 100)  -- 灰色中心线
-            for i = 2 to centerPoints.count do
-            (
-                gw.polyline #(centerPoints[i-1], centerPoints[i]) false
-            )
-            
-            -- 绘制样条线采样点（黄色×标记）
-            gw.setColor #line (color 255 255 0)  -- 黄色采样点
-            local markerSize = 5.0  -- ×标记大小
-            
-            -- 显示样条线1的采样点
-            for i = 0 to 50 do
-            (
-                local param = i / 50.0
-                local pt = lengthInterp spline1 1 param
-                -- 绘制×标记
-                gw.polyline #([pt.x - markerSize, pt.y - markerSize, pt.z], [pt.x + markerSize, pt.y + markerSize, pt.z]) false
-                gw.polyline #([pt.x + markerSize, pt.y - markerSize, pt.z], [pt.x - markerSize, pt.y + markerSize, pt.z]) false
-            )
-            
-            -- 显示样条线2的采样点
-            for i = 0 to 50 do
-            (
-                local param = i / 50.0
-                local pt = lengthInterp spline2 1 param
-                -- 绘制×标记
-                gw.polyline #([pt.x - markerSize, pt.y - markerSize, pt.z], [pt.x + markerSize, pt.y + markerSize, pt.z]) false
-                gw.polyline #([pt.x + markerSize, pt.y - markerSize, pt.z], [pt.x - markerSize, pt.y + markerSize, pt.z]) false
-            )
-        )
-        
-        -- 计算并绘制V字形位置点
-        local vPositions = calculateVShapePositions spline1 spline2 vSpacing direction fixedAngle
-        
+        -- 绘制V字形
         gw.setColor #line tgl_previewColor
-        for vData in vPositions do
+        for vShape in vShapeData do
         (
-            local vPos = vData[1]
-            local vDir = vData[2]
-            local leftBoundary = vData[3]
-            local rightBoundary = vData[4]
-            local vAngle = vData[5]
-            
-            -- 计算路径参数（用于边界检查）
-            local totalLength = 0
-            for j = 2 to centerPoints.count do
-            (
-                totalLength += distance centerPoints[j-1] centerPoints[j]
-            )
-            local pathParam = if totalLength > 0 then (distance centerPoints[1] vPos) / totalLength else 0.0
-            
-            -- 固定中心模型：计算标准V字形几何
-            local centerLine = vPos
-            local pathDirection = if vDir != undefined then vDir else [1,0,0]
-            pathDirection = pathDirection * direction
-            
-            -- 计算标准V字形的端点用于预览
-            local halfAngleRad = degToRad (vAngle / 2.0)
-            
-            -- 计算相对于路径方向的左右端点
-            local forwardDir = normalize pathDirection
-            
-            -- 使用边界点作为V字形端点（已约束在边界线上）
-            local centerBottom = centerLine
-            local leftTop = leftBoundary
-            local rightTop = rightBoundary
-            
-            -- 简化预览：只绘制V字形的基本轮廓（使用调整后的边界点）
-            local baseZ = centerBottom.z
-            local leftTopPreview = [leftTop.x, leftTop.y, baseZ]
-            local rightTopPreview = [rightTop.x, rightTop.y, baseZ]
-            local centerBottomPreview = [centerBottom.x, centerBottom.y, baseZ]
+            local leftTopPreview = vShape[1]
+            local centerBottomPreview = vShape[2]
+            local rightTopPreview = vShape[3]
+            local centerBottom = vShape[4]
             
             -- 绘制V字形中心骨架线
-            gw.setColor #line tgl_previewColor
             gw.polyline #(leftTopPreview, centerBottomPreview, rightTopPreview) false
             
-            -- 在V字形位置绘制一个小圆点标记
+            -- 绘制中心标记点
             gw.setColor #line (color 255 0 0)  -- 红色标记点
             local markerSize = 10.0
             gw.polyline #([centerBottom.x - markerSize, centerBottom.y, centerBottom.z], [centerBottom.x + markerSize, centerBottom.y, centerBottom.z]) false
             gw.polyline #([centerBottom.x, centerBottom.y - markerSize, centerBottom.z], [centerBottom.x, centerBottom.y + markerSize, centerBottom.z]) false
+            gw.setColor #line tgl_previewColor
         )
         
         gw.enlargeUpdateRect #whole
@@ -768,7 +1054,7 @@ fn drawTrafficGuidePreview splines vSpacing lineThick direction fixedAngle offse
 --   fixedAngle: 固定角度（度）
 -- 返回：生成的导流线组对象
 -------
-fn generateTrafficGuideLine splines vSpacing lineThick direction fixedAngle =
+fn generateTrafficGuideLine splines vSpacing lineThick direction centerOffset =
 (
     if splines.count < 2 then
     (
@@ -785,7 +1071,7 @@ fn generateTrafficGuideLine splines vSpacing lineThick direction fixedAngle =
     local startClosureLine = intersectionInfo[2]
     
     -- 计算V字形位置
-        local vPositions = calculateVShapePositions spline1 spline2 vSpacing direction fixedAngle
+        local vPositions = calculateVShapePositions spline1 spline2 vSpacing direction centerOffset
     
     try
     (
@@ -827,7 +1113,7 @@ fn generateTrafficGuideLine splines vSpacing lineThick direction fixedAngle =
             local pathParam = if totalLength > 0 then (distance centerPoints[1] vPos) / totalLength else 0.0
             
             -- 创建单个V字形模型
-            local vShapeMesh = createVShapeModel vPos vDir leftBoundary rightBoundary spline1 spline2 lineThick direction vAngle
+            local vShapeMesh = createVShapeModel vPos vDir leftBoundary rightBoundary spline1 spline2 lineThick direction vAngle centerOffset
             
             if vShapeMesh != undefined then
             (
@@ -878,7 +1164,7 @@ fn generateTrafficGuideLine splines vSpacing lineThick direction fixedAngle =
 )
 
 -------
--- 预览系统
+-- 优化的预览系统
 -------
 fn initTrafficGuidePreview =
 (
@@ -886,12 +1172,61 @@ fn initTrafficGuidePreview =
     (
         if tgl_previewEnabled and tgl_selectedSplines.count >= 2 then
         (
-            drawTrafficGuidePreview tgl_selectedSplines tgl_vSpacing tgl_lineThickness tgl_vDirection tgl_standardVAngle tgl_offsetDistance
+            -- 智能节流机制：只有缓存失效时才重新绘制
+            if not tgl_cacheValid then
+            (
+                drawTrafficGuidePreview tgl_selectedSplines tgl_vSpacing tgl_lineThickness tgl_vDirection tgl_centerOffset tgl_offsetDistance
+            )
+            else
+            (
+                -- 使用缓存数据快速重绘
+                local previewData = tgl_previewCache
+                if previewData.count > 0 then
+                (
+                    local closureData = previewData[1]
+                    local vShapeData = previewData[2]
+                    
+                    gw.setTransform(matrix3 1)
+                    
+                    -- 快速绘制封闭线段
+                    if closureData != undefined then
+                    (
+                        local startClosureLine = closureData[1]
+                        local offsetData = closureData[2]
+                        
+                        gw.setColor #line (color 0 255 255)
+                        gw.polyline #(startClosureLine[1], startClosureLine[2]) false
+                        
+                        if offsetData != undefined then
+                        (
+                            gw.setColor #line (color 255 0 0)
+                            gw.polyline #(offsetData[1], offsetData[2]) false
+                        )
+                    )
+                    
+                    -- 快速绘制V字形
+                    gw.setColor #line tgl_previewColor
+                    for vShape in vShapeData do
+                    (
+                        gw.polyline #(vShape[1], vShape[2], vShape[3]) false
+                        
+                        local centerBottom = vShape[4]
+                        local markerSize = 10.0
+                        gw.setColor #line (color 255 0 0)
+                        gw.polyline #([centerBottom.x - markerSize, centerBottom.y, centerBottom.z], [centerBottom.x + markerSize, centerBottom.y, centerBottom.z]) false
+                        gw.polyline #([centerBottom.x, centerBottom.y - markerSize, centerBottom.z], [centerBottom.x, centerBottom.y + markerSize, centerBottom.z]) false
+                        gw.setColor #line tgl_previewColor
+                    )
+                    
+                    gw.enlargeUpdateRect #whole
+                    gw.updateScreen()
+                )
+            )
         )
     )
     catch
     (
-        print ("initTrafficGuidePreview 错误: " + getCurrentException())
+        -- 静默处理错误
     )
 )
 
@@ -912,64 +1247,92 @@ fn unregisterPreview =
 -- 用户界面
 -------
 try destroyDialog TrafficGuideLineRol catch()
-rollout TrafficGuideLineRol "车道导流线生成器 v2.1.0" width:220 height:420
+rollout TrafficGuideLineRol "车道导流线生成器 v2.2.0" width:220 height:505
 (
     groupBox 'grp1' "样条线选择" pos:[8,8] width:204 height:60 align:#left
     label 'lblInfo' "请选择两条样条线作为车道边界" pos:[15,25] width:190 height:15 align:#left
     button 'btnSelect' "选择样条线" pos:[15,40] width:100 height:25 align:#left
     label 'lblCount' "已选择: 0 条" pos:[125,45] width:80 height:15 align:#left
     
-    groupBox 'grp2' "V字形参数" pos:[8,75] width:204 height:145 align:#left
-    spinner 'spnStandardAngle' "开合角度:" pos:[15,95] width:150 height:20 range:[15,120,60] type:#float scale:0.1
-    spinner 'spnVSpacing' "V字间距:" pos:[15,120] width:150 height:20 range:[100,1000,200] type:#worldunits scale:0.01
-    spinner 'spnLineThickness' "线条厚度:" pos:[15,145] width:150 height:20 range:[10,500,100] type:#worldunits scale:0.01
-    spinner 'spnOffsetDistance' "偏移距离:" pos:[15,170] width:150 height:20 range:[0,500,30] type:#worldunits scale:0.01
-    radiobuttons 'rdoDirection' "V字方向:" pos:[15,195] width:180 height:20 labels:#("正向", "反向") default:1
+    groupBox 'grp2' "V字形参数" pos:[8,75] width:204 height:195 align:#left
+    checkbox 'chkFixedAngle' "固定角度模式" pos:[15,95] width:100 height:20 align:#left checked:true
+    spinner 'spnFixedAngle' "固定角度:" pos:[15,115] width:150 height:20 range:[15,180,60] type:#float enabled:true
+    spinner 'spnCenterOffset' "中点偏移:" pos:[15,140] width:150 height:20 range:[0,500,100] type:#worldunits scale:0.01
+    button 'btnAngleCalc' "角度计算器" pos:[170,140] width:35 height:20 align:#left enabled:false
+    spinner 'spnVSpacing' "V字间距:" pos:[15,165] width:150 height:20 range:[100,1000,200] type:#worldunits scale:0.01
+    spinner 'spnLineThickness' "线条厚度:" pos:[15,190] width:150 height:20 range:[10,500,100] type:#worldunits scale:0.01
+    spinner 'spnOffsetDistance' "偏移距离:" pos:[15,215] width:150 height:20 range:[0,500,30] type:#worldunits scale:0.01
+    radiobuttons 'rdoDirection' "V字方向:" pos:[15,240] width:180 height:20 labels:#("正向", "反向") default:1
     
-    groupBox 'grp3' "预览和生成" pos:[8,230] width:204 height:80 align:#left
-    checkbox 'chkPreview' "显示预览" pos:[15,250] width:80 height:20 align:#left
-    button 'btnGenerate' "生成导流线" pos:[50,275] width:120 height:30 align:#left
+    groupBox 'grp3' "预览和生成" pos:[8,280] width:204 height:80 align:#left
+    checkbox 'chkPreview' "显示预览" pos:[15,300] width:80 height:20 align:#left
+    button 'btnGenerate' "生成导流线" pos:[50,325] width:120 height:30 align:#left
     
-    groupBox 'grp4' "使用说明" pos:[8,320] width:204 height:90 align:#left
-    label 'lblHelp1' "1. 选择两条定义车道边界的样条线" pos:[12,335] width:195 height:12 align:#left
-    label 'lblHelp2' "2. 调整V字形参数（角度、间距、厚度、偏移）" pos:[12,347] width:195 height:12 align:#left
-    label 'lblHelp3' "3. 开启预览查看效果，然后生成" pos:[12,359] width:195 height:12 align:#left
-    label 'lblHelp4' "注：使用固定中心模型，边界点约束在边界线上" pos:[12,371] width:195 height:12 align:#left
-    label 'lblHelp5' "偏移距离：控制红色线段沿中心线向后的偏移距离" pos:[12,383] width:195 height:12 align:#left
+    groupBox 'grp4' "使用说明" pos:[8,370] width:204 height:125 align:#left
+    label 'lblHelp1' "1. 选择两条定义车道边界的样条线" pos:[12,385] width:195 height:12 align:#left
+    label 'lblHelp2' "2. 选择固定角度模式或动态角度模式" pos:[12,397] width:195 height:12 align:#left
+    label 'lblHelp3' "3. 调整V字形参数（角度、偏移、间距等）" pos:[12,409] width:195 height:12 align:#left
+    label 'lblHelp4' "4. 使用角度计算器进行精确设置" pos:[12,421] width:195 height:12 align:#left
+    label 'lblHelp5' "5. 开启预览查看效果，然后生成" pos:[12,433] width:195 height:12 align:#left
+    label 'lblHelp6' "注：固定角度模式保证所有V形角度一致" pos:[12,445] width:195 height:12 align:#left
+    label 'lblHelp7' "中点偏移：控制V形中心顶点的位置调整" pos:[12,457] width:195 height:12 align:#left
     
     -- 更新预览
     fn updatePreview =
     (
         if chkPreview.checked and tgl_selectedSplines.count >= 2 then
         (
-            tgl_standardVAngle = spnStandardAngle.value
+            -- 更新全局参数
+            tgl_useFixedAngle = chkFixedAngle.checked
+            tgl_fixedAngle = spnFixedAngle.value
+            tgl_centerOffset = spnCenterOffset.value
             tgl_vSpacing = spnVSpacing.value
             tgl_lineThickness = spnLineThickness.value
             tgl_offsetDistance = spnOffsetDistance.value
             tgl_vDirection = if rdoDirection.state == 1 then 1 else -1
+            
+            -- 标记缓存失效，强制重新计算
+            tgl_cacheValid = false
             redrawviews()
         )
+    )
+    
+    -- 清除预览缓存
+    fn clearPreviewCache =
+    (
+        tgl_previewCache = #()
+        tgl_cacheValid = false
+        tgl_lastParams = #()
     )
     
     -- 界面事件
     on TrafficGuideLineRol open do
     (
         unregisterPreview()
+        clearPreviewCache()  -- 清除缓存
         tgl_previewEnabled = false
         chkPreview.checked = false
         tgl_selectedSplines = #()
         lblCount.text = "已选择: 0 条"
+        
+        -- 初始化固定角度模式UI状态
+        chkFixedAngle.checked = tgl_useFixedAngle
+        spnFixedAngle.value = tgl_fixedAngle
+        spnFixedAngle.enabled = tgl_useFixedAngle
+        btnAngleCalc.enabled = not tgl_useFixedAngle
     )
     
     on TrafficGuideLineRol close do
     (
         unregisterPreview()
+        clearPreviewCache()  -- 清除缓存
         tgl_selectedSplines = #()
         tgl_previewEnabled = false
     )
     
     on btnSelect pressed do
     (
+        clearPreviewCache()  -- 清除缓存，因为样条线可能改变
         local selectedShapes = #()
         for obj in selection do
         (
@@ -1017,11 +1380,136 @@ rollout TrafficGuideLineRol "车道导流线生成器 v2.1.0" width:220 height:4
         )
     )
     
-    on spnStandardAngle changed val do updatePreview() 
+    on chkFixedAngle changed state do
+    (
+        tgl_useFixedAngle = state
+        spnFixedAngle.enabled = state
+        btnAngleCalc.enabled = not state
+        updatePreview()
+    )
+    
+    on spnFixedAngle changed val do updatePreview()
+    on spnCenterOffset changed val do updatePreview() 
     on spnVSpacing changed val do updatePreview()
     on spnLineThickness changed val do updatePreview()
     on spnOffsetDistance changed val do updatePreview()
     on rdoDirection changed state do updatePreview()
+    
+    on btnAngleCalc pressed do
+    (
+        if tgl_selectedSplines.count >= 2 then
+        (
+            -- 创建角度计算器对话框
+            rollout AngleCalculatorRol "V形角度计算器" width:250 height:320
+            (
+                groupBox 'grp1' "角度分析" pos:[8,8] width:234 height:120 align:#left
+                button 'btnAnalyze' "分析角度-偏移关系" pos:[15,25] width:140 height:25 align:#left
+                label 'lblCurrentAngle' "当前角度: --°" pos:[15,55] width:220 height:15 align:#left
+                label 'lblCurrentOffset' "当前偏移: --mm" pos:[15,70] width:220 height:15 align:#left
+                
+                groupBox 'grp2' "反向计算" pos:[8,135] width:234 height:80 align:#left
+                spinner 'spnTargetAngle' "目标角度(°):" pos:[15,155] width:150 height:20 range:[10,180,60] type:#float
+                button 'btnCalcOffset' "计算所需偏移" pos:[15,185] width:100 height:25 align:#left
+                label 'lblResult' "结果: --mm" pos:[125,190] width:100 height:15 align:#left
+                
+                groupBox 'grp3' "快速设置" pos:[8,225] width:234 height:80 align:#left
+                button 'btnSet30' "30°" pos:[15,245] width:40 height:25 align:#left
+                button 'btnSet45' "45°" pos:[60,245] width:40 height:25 align:#left
+                button 'btnSet60' "60°" pos:[105,245] width:40 height:25 align:#left
+                button 'btnSet90' "90°" pos:[150,245] width:40 height:25 align:#left
+                button 'btnSet120' "120°" pos:[195,245] width:40 height:25 align:#left
+                button 'btnApplyOffset' "应用到主界面" pos:[70,275] width:110 height:25 align:#left
+                
+                local calculatedOffset = 0.0
+                
+                fn getCurrentVShapeData =
+                (
+                    -- 获取当前第一个V形的数据用于计算
+                    local vPositions = calculateVShapePositions tgl_selectedSplines[1] tgl_selectedSplines[2] tgl_vSpacing tgl_vDirection tgl_centerOffset
+                    if vPositions.count > 0 then
+                        return vPositions[1]
+                    else
+                        return undefined
+                )
+                
+                on btnAnalyze pressed do
+                (
+                    local vData = getCurrentVShapeData()
+                    if vData != undefined then
+                    (
+                        local centerPos = vData[1]
+                        local centerDir = vData[2]
+                        local leftBoundary = vData[3]
+                        local rightBoundary = vData[4]
+                        
+                        print "=== 角度-偏移关系分析 ==="
+                        analyzeAngleOffsetRelation centerPos centerDir leftBoundary rightBoundary
+                        
+                        -- 显示当前参数的角度
+                        local currentAngle = calculateAngleFromOffset centerPos centerDir leftBoundary rightBoundary tgl_centerOffset
+                        lblCurrentAngle.text = "当前角度: " + (formattedPrint currentAngle format:":.1f") + "°"
+                        lblCurrentOffset.text = "当前偏移: " + tgl_centerOffset as string + "mm"
+                    )
+                    else
+                    (
+                        messageBox "无法获取V形数据，请检查样条线选择！" title:"错误"
+                    )
+                )
+                
+                on btnCalcOffset pressed do
+                (
+                    local vData = getCurrentVShapeData()
+                    if vData != undefined then
+                    (
+                        local centerPos = vData[1]
+                        local centerDir = vData[2]
+                        local leftBoundary = vData[3]
+                        local rightBoundary = vData[4]
+                        
+                        calculatedOffset = getOffsetForAngle centerPos centerDir leftBoundary rightBoundary spnTargetAngle.value
+                        lblResult.text = "结果: " + (formattedPrint calculatedOffset format:":.1f") + "mm"
+                    )
+                    else
+                    (
+                        messageBox "无法获取V形数据，请检查样条线选择！" title:"错误"
+                    )
+                )
+                
+                fn setAngleAndCalculate angle =
+                (
+                    spnTargetAngle.value = angle
+                    btnCalcOffset.pressed()
+                )
+                
+                on btnSet30 pressed do setAngleAndCalculate 30
+                on btnSet45 pressed do setAngleAndCalculate 45  
+                on btnSet60 pressed do setAngleAndCalculate 60
+                on btnSet90 pressed do setAngleAndCalculate 90
+                on btnSet120 pressed do setAngleAndCalculate 120
+                
+                on btnApplyOffset pressed do
+                (
+                    if calculatedOffset > 0 then
+                    (
+                        TrafficGuideLineRol.spnCenterOffset.value = calculatedOffset
+                        TrafficGuideLineRol.updatePreview()
+                        messageBox ("已设置中点偏移为: " + calculatedOffset as string + "mm") title:"完成"
+                        destroyDialog AngleCalculatorRol
+                    )
+                    else
+                    (
+                        messageBox "请先计算偏移距离！" title:"提示"
+                    )
+                )
+            )
+            
+            createDialog AngleCalculatorRol modal:true
+        )
+        else
+        (
+            messageBox "请先选择两条样条线！" title:"提示"
+        )
+    )
     
     on btnGenerate pressed do
     (
@@ -1042,18 +1530,22 @@ rollout TrafficGuideLineRol "车道导流线生成器 v2.1.0" width:220 height:4
             )
             
             -- 收集参数
-            local standardAngle = spnStandardAngle.value
+            local useFixedAngle = chkFixedAngle.checked
+            local fixedAngle = spnFixedAngle.value
+            local centerOffset = spnCenterOffset.value
             local vSpacing = spnVSpacing.value
             local lineThickness = spnLineThickness.value
             local offsetDistance = spnOffsetDistance.value
             local direction = if rdoDirection.state == 1 then 1 else -1
             
-            -- 更新全局标准参数
-            tgl_standardVAngle = standardAngle
+            -- 更新全局参数
+            tgl_useFixedAngle = useFixedAngle
+            tgl_fixedAngle = fixedAngle
+            tgl_centerOffset = centerOffset
             tgl_offsetDistance = offsetDistance
             
             -- 生成导流线
-            local result = generateTrafficGuideLine tgl_selectedSplines vSpacing lineThickness direction standardAngle
+            local result = generateTrafficGuideLine tgl_selectedSplines vSpacing lineThickness direction centerOffset
             
             if result != undefined then
             (
