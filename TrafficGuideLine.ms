@@ -56,27 +56,9 @@ fn calculateBoundaryPoint centerPos pathDirection boundarySpline fixedAngle isLe
         (
             local testPoint = centerPos + armDir * (i * stepSize)
             
-            -- 计算测试点到样条线的最近点（简化版本）
-            local splineParam = 0.0
-            local minDist = 1e6
-            local closestPoint = testPoint
-            
-            -- 在样条线上采样寻找最近点
-            for j = 0 to 20 do
-            (
-                local param = j / 20.0
-                local samplePoint = lengthInterp boundarySpline 1 param
-                local dist = distance testPoint samplePoint
-                if dist < minDist then
-                (
-                    minDist = dist
-                    closestPoint = samplePoint
-                    splineParam = param
-                )
-            )
-            
-            local splinePoint = closestPoint
-            local distance = minDist
+            -- 使用参数化投影方法计算测试点到样条线的最近点
+            local splinePoint = findClosestPointOnSplineParametric boundarySpline testPoint
+            local distance = distance testPoint splinePoint
             
             -- 如果找到更近的点，更新结果
             if distance < minDistance then
@@ -190,9 +172,9 @@ fn createStandardVShape centerPos pathDirection lineThickness leftBoundary right
 )
 
 -------
--- 核心算法：计算两条样条线之间的中心路径
+-- 核心算法：计算两条样条线之间的中心路径（改进版）
 -------
-fn calculateCenterPath spline1 spline2 =
+fn calculateCenterPathAdaptive spline1 spline2 targetSegmentLength:10.0 minSamples:20 maxSamples:100 =
 (
     local centerPoints = #()
     local spline1Length = curveLength spline1 1
@@ -201,11 +183,13 @@ fn calculateCenterPath spline1 spline2 =
     
     if maxLength > 0 then
     (
-        -- 沿路径采样点，计算中心线
-        local sampleCount = 50  -- 采样点数量
-        for i = 0 to sampleCount do
+        -- 根据路径长度自适应计算采样点数量
+        local adaptiveSampleCount = (maxLength / targetSegmentLength) as integer
+        adaptiveSampleCount = amax minSamples (amin maxSamples adaptiveSampleCount)
+        
+        for i = 0 to adaptiveSampleCount do
         (
-            local param = i as float / sampleCount as float
+            local param = i as float / adaptiveSampleCount as float
             
             -- 在两条样条线上获取对应点
             local pos1 = lengthInterp spline1 1 param
@@ -221,27 +205,71 @@ fn calculateCenterPath spline1 spline2 =
 )
 
 -------
+-- 向后兼容的中心路径计算函数
+-------
+fn calculateCenterPath spline1 spline2 =
+(
+    -- 使用改进的自适应算法，但保持原有的默认行为
+    return calculateCenterPathAdaptive spline1 spline2 targetSegmentLength:10.0 minSamples:50 maxSamples:50
+)
+
+-------
 -- 辅助函数：查找样条线上最近的点
+-------
+fn findClosestPointOnSplineParametric splineObj targetPoint tolerance:0.001 maxIterations:20 =
+(
+    local bestParam = 0.5  -- 初始参数值
+    local bestPoint = lengthInterp splineObj 1 bestParam
+    local bestDist = distance targetPoint bestPoint
+    
+    -- 使用二分搜索优化的参数化投影方法
+    local searchRange = 1.0  -- 搜索范围
+    local searchCenter = 0.5  -- 搜索中心
+    
+    for iteration = 1 to maxIterations do
+    (
+        local stepSize = searchRange / 4.0
+        local improved = false
+        
+        -- 在当前搜索范围内测试多个点
+        for testOffset in #(-stepSize, 0, stepSize) do
+        (
+            local testParam = searchCenter + testOffset
+            
+            -- 确保参数在有效范围内
+            if testParam >= 0.0 and testParam <= 1.0 then
+            (
+                local testPoint = lengthInterp splineObj 1 testParam
+                local testDist = distance targetPoint testPoint
+                
+                if testDist < bestDist then
+                (
+                    bestDist = testDist
+                    bestParam = testParam
+                    bestPoint = testPoint
+                    searchCenter = testParam
+                    improved = true
+                )
+            )
+        )
+        
+        -- 缩小搜索范围
+        searchRange *= 0.5
+        
+        -- 如果距离足够小或没有改进，提前退出
+        if bestDist < tolerance or not improved then
+            exit
+    )
+    
+    return bestPoint
+)
+
+-------
+-- 向后兼容的包装函数
 -------
 fn findClosestPointOnSpline splineObj targetPoint =
 (
-    local closestPoint = targetPoint
-    local minDist = 1e6
-    
-    -- 在样条线上采样寻找最近点
-    for i = 0 to 50 do
-    (
-        local param = i / 50.0
-        local samplePoint = lengthInterp splineObj 1 param
-        local dist = distance targetPoint samplePoint
-        if dist < minDist then
-        (
-            minDist = dist
-            closestPoint = samplePoint
-        )
-    )
-    
-    return closestPoint
+    return findClosestPointOnSplineParametric splineObj targetPoint
 )
 
 -------
@@ -326,13 +354,21 @@ fn createClosureLine startPoint endPoint lineThickness spline1 spline2 extension
             local spline2Dir = normalize (spline2EndPt - spline2StartPt)
             local backwardDirection = normalize (spline1Dir + spline2Dir)
             
-            -- 计算原始封闭线段沿中心线向后偏移后的位置
-            local offsetStartPoint = startPoint + (backwardDirection * extensionDistance)
-            local offsetEndPoint = endPoint + (backwardDirection * extensionDistance)
+            -- 使用参数化方法计算偏移点（类似V字距离的数学映射）
+            local spline1Length = curveLength spline1 1
+            local spline2Length = curveLength spline2 1
             
-            -- 将偏移后的点投影到对应的样条线上（确保在边界内）
-            local projectedStart = findClosestPointOnSpline spline1 offsetStartPoint
-            local projectedEnd = findClosestPointOnSpline spline2 offsetEndPoint
+            -- 将扩展距离转换为样条线参数
+            local offsetParam1 = if spline1Length > 0 then (extensionDistance / spline1Length) else 0.0
+            local offsetParam2 = if spline2Length > 0 then (extensionDistance / spline2Length) else 0.0
+            
+            -- 确保参数在有效范围内
+            offsetParam1 = amax 0.0 (amin 1.0 offsetParam1)
+            offsetParam2 = amax 0.0 (amin 1.0 offsetParam2)
+            
+            -- 直接使用lengthInterp获取精确的偏移点
+            local projectedStart = lengthInterp spline1 1 offsetParam1
+            local projectedEnd = lengthInterp spline2 1 offsetParam2
             
             -- 创建中心偏移线段
             local extendedMesh = createSingleClosureLine projectedStart projectedEnd lineThickness "CenterOffsetLine"
@@ -509,8 +545,8 @@ fn calculateVShapePositions spline1 spline2 vSpacing direction fixedAngle =
             -- 计算需要避开的封闭区域长度
             local closureBuffer = vSpacing * 0.5  -- 封闭区域缓冲距离
             
-            -- 只有在起始点有封闭线段时才设置缓冲区域
-            local startOffset = if startIntersect then 0 else closureBuffer  -- 起始点未重合时避让
+            -- 统一逻辑：无论起始点是否重合，都设置缓冲区域（不生成第一个中心模型）
+            local startOffset = closureBuffer  -- 统一避让策略，从第二个位置开始生成
             
             -- 有效的V字形生成区域（从起始点算起）
             local validStartDist = startOffset
@@ -608,13 +644,21 @@ fn drawTrafficGuidePreview splines vSpacing lineThick direction fixedAngle offse
                 local spline2Dir = normalize (spline2EndPt - spline2StartPt)
                 local backwardDirection = normalize (spline1Dir + spline2Dir)
                 
-                -- 计算沿中心线向后偏移的端点
-                local offsetStart = startClosureLine[1] + (backwardDirection * offsetDistance)
-                local offsetEnd = startClosureLine[2] + (backwardDirection * offsetDistance)
+                -- 使用参数化方法计算偏移点（类似V字距离的数学映射）
+                local spline1Length = curveLength spline1 1
+                local spline2Length = curveLength spline2 1
                 
-                -- 将偏移后的点投影到对应的样条线上
-                local projectedStart = findClosestPointOnSpline spline1 offsetStart
-                local projectedEnd = findClosestPointOnSpline spline2 offsetEnd
+                -- 将偏移距离转换为样条线参数
+                local offsetParam1 = if spline1Length > 0 then (offsetDistance / spline1Length) else 0.0
+                local offsetParam2 = if spline2Length > 0 then (offsetDistance / spline2Length) else 0.0
+                
+                -- 确保参数在有效范围内
+                offsetParam1 = amax 0.0 (amin 1.0 offsetParam1)
+                offsetParam2 = amax 0.0 (amin 1.0 offsetParam2)
+                
+                -- 直接使用lengthInterp获取精确的偏移点
+                local projectedStart = lengthInterp spline1 1 offsetParam1
+                local projectedEnd = lengthInterp spline2 1 offsetParam2
                 
                 gw.setColor #line (color 255 0 0)  -- 红色中心偏移线段
                 gw.polyline #(projectedStart, projectedEnd) false
