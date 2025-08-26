@@ -183,17 +183,84 @@ fn drawDashedPreview objs solidLen gapLen lineWidth lineThickness generatePlane 
     )
 )
 
+
+
+
+
+
+
 -------
 -- 生成函数：创建实际的几何体
 -------
+
+-- 创建平面几何体的函数
+fn createPlaneFromSpline sourceSpline planeWidth =
+(
+    try
+    (
+        local verts = #()
+        local faces = #()
+        local vertIndex = 1
+        
+        for splineIdx = 1 to numSplines sourceSpline do
+        (
+            local segCount = numSegments sourceSpline splineIdx
+            local halfWidth = planeWidth / 2.0
+            
+            for segIdx = 1 to segCount do
+            (
+                local startParam = (segIdx - 1) as float / segCount as float
+                local endParam = segIdx as float / segCount as float
+                
+                local startPos = lengthInterp sourceSpline splineIdx startParam
+                local endPos = lengthInterp sourceSpline splineIdx endParam
+                
+                local segmentDir = normalize (endPos - startPos)
+                local perpDir = normalize (cross segmentDir [0,0,1])
+                
+                local v1 = startPos - perpDir * halfWidth
+                local v2 = startPos + perpDir * halfWidth
+                local v3 = endPos + perpDir * halfWidth
+                local v4 = endPos - perpDir * halfWidth
+                
+                append verts v1
+                append verts v2
+                append verts v3
+                append verts v4
+                
+                local face1 = [vertIndex, vertIndex+1, vertIndex+2]
+                local face2 = [vertIndex, vertIndex+2, vertIndex+3]
+                
+                append faces face1
+                append faces face2
+                
+                vertIndex += 4
+            )
+        )
+        
+        if verts.count > 0 and faces.count > 0 then
+        (
+            local meshObj = mesh vertices:verts faces:faces
+            meshObj.name = sourceSpline.name + "_Plane"
+            return meshObj
+        )
+    )
+    catch
+    (
+        return undefined
+    )
+    
+    return undefined
+)
+
 fn generateDashedShape sourceObj solidLen gapLen lineWidth lineThickness generatePlane useLinear =
 (
     local newObj = copy sourceObj
     convertToSplineShape newObj
     
     -- 创建新的样条线形状来存储结果
-    local resultShape = SplineShape()
-    resultShape.name = sourceObj.name + "_Dashed"
+    local resultShape = Line pos:[0,0,0] name:(sourceObj.name + "_Dashed")
+    convertToSplineShape resultShape
     
     for splineIdx = 1 to numSplines newObj do
     (
@@ -246,64 +313,7 @@ fn generateDashedShape sourceObj solidLen gapLen lineWidth lineThickness generat
 -------
 -- 创建平面几何体的辅助函数
 -------
-fn createPlaneFromSpline splineShape planeWidth =
-(
-    try
-    (
-        local verts = #()
-        local faces = #()
-        local vertIndex = 1
-        
-        for splineIdx = 1 to numSplines splineShape do
-        (
-            local segCount = numSegments splineShape splineIdx
-            local halfWidth = planeWidth / 2.0
-            
-            for segIdx = 1 to segCount do
-            (
-                local startParam = (segIdx - 1) as float / segCount as float
-                local endParam = segIdx as float / segCount as float
-                
-                local startPos = lengthInterp splineShape splineIdx startParam
-                local endPos = lengthInterp splineShape splineIdx endParam
-                
-                local segmentDir = normalize (endPos - startPos)
-                local perpDir = normalize (cross segmentDir [0,0,1])
-                
-                local v1 = startPos - perpDir * halfWidth
-                local v2 = startPos + perpDir * halfWidth
-                local v3 = endPos + perpDir * halfWidth
-                local v4 = endPos - perpDir * halfWidth
-                
-                append verts v1
-                append verts v2
-                append verts v3
-                append verts v4
-                
-                local face1 = [vertIndex, vertIndex+1, vertIndex+2]
-                local face2 = [vertIndex, vertIndex+2, vertIndex+3]
-                
-                append faces face1
-                append faces face2
-                
-                vertIndex += 4
-            )
-        )
-        
-        if verts.count > 0 and faces.count > 0 then
-        (
-            local meshObj = mesh vertices:verts faces:faces
-            meshObj.name = splineShape.name + "_Plane"
-            return meshObj
-        )
-    )
-    catch
-    (
-        return undefined
-    )
-    
-    return undefined
-)
+
 
 -------
 -- 预览系统
