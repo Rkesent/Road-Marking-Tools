@@ -8,23 +8,25 @@ global ds_previewColor = color 0 255 0  -- 绿色预览线条
 global ds_selectedObjs = #()
 global ds_previewEnabled = false
 global ds_solidLength = 600
-global ds_gapLength = 900
+global ds_gapLength = 900  -- 采样点之间的距离间隔
 global ds_lineWidth = 40
 global ds_lineThickness = 0
 global ds_useLinear = false
 
 -------
--- 核心算法：统一的虚线分割逻辑
+-- 核心算法：基于固定采样间隔的虚线分割逻辑
 -- 这个函数负责计算虚线段的位置，预览和生成都使用这个函数
+-- solidLen: 虚线长度（距离单位）
+-- gapDist: 采样点之间的距离间隔（距离单位）
 -------
-fn calculateDashedSegments splineObj splineIdx solidLen gapLen =
+fn calculateDashedSegments splineObj splineIdx solidLen gapDist =
 (
     local result = #()
     local splineLength = curveLength splineObj splineIdx
     
     if solidLen > 0 and splineLength > 0 then
     (
-        if gapLen <= 0.001 then
+        if gapDist <= 0.001 then
         (
             -- 特殊情况：间隔为0，生成连续实线
             -- 按solidLen分割，连续排列
@@ -61,13 +63,13 @@ fn calculateDashedSegments splineObj splineIdx solidLen gapLen =
         )
         else
         (
-            -- 正常情况：有间隔的虚线
-            local segmentCycle = solidLen + gapLen  -- 一个完整周期的长度
+            -- 基于固定采样间隔的虚线生成
+            -- 采样点按固定距离间隔分布，虚线段在这些采样点上生成
             local currentDist = 0.0
             
             while currentDist < splineLength do
             (
-                -- 计算当前实线段的起始和结束距离
+                -- 计算当前虚线段的起始和结束距离
                 local segStartDist = currentDist
                 local segEndDist = currentDist + solidLen
                 
@@ -85,8 +87,8 @@ fn calculateDashedSegments splineObj splineIdx solidLen gapLen =
                 
                 append result #(startPos, endPos)
                 
-                -- 移动到下一个周期的起始位置
-                currentDist += segmentCycle
+                -- 移动到下一个采样点位置（固定间隔距离）
+                currentDist += gapDist
             )
         )
     )
@@ -347,18 +349,26 @@ fn unregisterPreview =
 -- 用户界面
 -------
 try destroyDialog DashedShapeRol catch()
-rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:320
+rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
 (
     groupBox 'grp1' "参数" pos:[8,8] width:189 height:170 align:#left
-    spinner 'spn1' "虚线：" pos:[17,25] width:135 height:20 range:[0,10000,600] type:#worldunits scale:0.01
-    spinner 'spn2' "间隔：" pos:[17,50] width:135 height:20 range:[0,10000,900] type:#worldunits scale:0.01
-    spinner 'spn3' "宽度：" pos:[17,75] width:135 height:20 range:[0,10000,40] type:#worldunits scale:0.01
-    spinner 'spn4' "厚度：" pos:[17,100] width:135 height:20 range:[0,10000,0] type:#worldunits scale:0.01
-    checkbox 'onLinear' "线性" pos:[22,125] width:80 height:22 align:#left
-    checkbox 'chkPlane' "生成平面" pos:[110,125] width:80 height:22 align:#left
-    checkbox 'chkPreview' "显示预览" pos:[22,150] width:80 height:22 align:#left
+    spinner 'spn1' "虚线长度：" pos:[17,25] width:135 height:20 range:[0,10000,300] type:#worldunits scale:0.01
+    spinner 'spn2' "采样间隔：" pos:[17,50] width:135 height:20 range:[0,10000,500] type:#worldunits scale:0.01
+    spinner 'spn3' "虚线宽度：" pos:[17,75] width:135 height:20 range:[0,10000,40] type:#worldunits scale:0.01
+    spinner 'spn4' "虚线厚度：" pos:[17,100] width:135 height:20 range:[0,10000,0] type:#worldunits scale:0.01
+    checkbox 'onLinear' "线性" pos:[10,125] width:40 height:22 align:#left
+    checkbox 'chkPlane' "生成平面" pos:[80,125] width:70 height:22 align:#left
+    checkbox 'chkPreview' "显示预览" pos:[10,150] width:70 height:22 align:#left
+    checkbox 'chkQuadify' "四边形化" pos:[80,150] width:70 height:22 align:#left
+    spinner 'spnQuadSize' "" pos:[150,155] width:30 height:22 range:[1,100,20] type:#integer
     
-    button genBtn "生成" pos:[44,185] width:120 height:40
+    groupBox 'grp2' "预设" pos:[8,185] width:189 height:100 align:#left
+    button 'btnPreset1' "中短线" pos:[17,205] width:55 height:25 tooltip:"虚线长度:200\n采样间隔:600\n宽度:30"
+    button 'btnPreset2' "斑马线" pos:[75,205] width:55 height:25 tooltip:"虚线长度:50\n采样间隔:101\n宽度:520"
+    button 'btnPreset3' "高架桥69线" pos:[133,205] width:55 height:25 tooltip:"虚线长度:620\n采样间隔:1510\n宽度:30"
+    button 'btnPreset4' "停车线" pos:[17,235] width:55 height:25 tooltip:"虚线长度:100\n采样间隔:200\n宽度:50"
+    
+    button genBtn "生成" pos:[44,295] width:120 height:40
     
     -- 更新预览
     fn updatePreview =
@@ -382,7 +392,10 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:320
         ds_previewEnabled = false
         chkPreview.checked = false
         chkPlane.checked = false
+        chkQuadify.checked = false
         spn4.enabled = true
+        chkQuadify.enabled = false
+        spnQuadSize.enabled = false
         
         ds_solidLength = spn1.value
         ds_gapLength = spn2.value
@@ -424,8 +437,108 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:320
     on chkPlane changed state do
     (
         spn4.enabled = not state
+        chkQuadify.enabled = state
+        spnQuadSize.enabled = (state and chkQuadify.checked)
         updatePreview()
     )
+    
+    on chkQuadify changed state do
+    (
+        spnQuadSize.enabled = (chkPlane.checked and state)
+    )
+    
+    -- 预设按钮事件
+    on btnPreset1 pressed do
+     (
+         -- 中短线：虚线长度：200 采样间隔：600，宽度：30
+         spn1.value = 200
+         spn2.value = 600
+         spn3.value = 30
+         chkPlane.checked = true
+         chkPreview.checked = true
+         chkQuadify.checked = true
+         spnQuadSize.value = 20
+         spn4.enabled = false
+         chkQuadify.enabled = true
+         spnQuadSize.enabled = true
+         
+         -- 手动启用预览系统
+         ds_previewEnabled = true
+         if selection.count > 0 then
+         (
+             registerPreview()
+             updatePreview()
+         )
+     )
+    
+    on btnPreset2 pressed do
+     (
+         -- 斑马线：虚线长度：50 采样间隔：101，宽度：520
+         spn1.value = 50
+         spn2.value = 101
+         spn3.value = 520
+         chkPlane.checked = true
+         chkPreview.checked = true
+         chkQuadify.checked = true
+         spnQuadSize.value = 20
+         spn4.enabled = false
+         chkQuadify.enabled = true
+         spnQuadSize.enabled = true
+         
+         -- 手动启用预览系统
+         ds_previewEnabled = true
+         if selection.count > 0 then
+         (
+             registerPreview()
+             updatePreview()
+         )
+     )
+    
+    on btnPreset3 pressed do
+     (
+         -- 高架桥69线：虚线长度：620 采样间隔：1510，宽度：30
+         spn1.value = 620
+         spn2.value = 1510
+         spn3.value = 30
+         chkPlane.checked = true
+         chkPreview.checked = true
+         chkQuadify.checked = true
+         spnQuadSize.value = 20
+         spn4.enabled = false
+         chkQuadify.enabled = true
+         spnQuadSize.enabled = true
+         
+         -- 手动启用预览系统
+         ds_previewEnabled = true
+         if selection.count > 0 then
+         (
+             registerPreview()
+             updatePreview()
+         )
+     )
+    
+    on btnPreset4 pressed do
+     (
+         -- 停车线：虚线长度：100 采样间隔：200，宽度：50
+         spn1.value = 100
+         spn2.value = 200
+         spn3.value = 50
+         chkPlane.checked = true
+         chkPreview.checked = true
+         chkQuadify.checked = true
+         spnQuadSize.value = 20
+         spn4.enabled = false
+         chkQuadify.enabled = true
+         spnQuadSize.enabled = true
+         
+         -- 手动启用预览系统
+         ds_previewEnabled = true
+         if selection.count > 0 then
+         (
+             registerPreview()
+             updatePreview()
+         )
+     )
     
     on genBtn pressed do
     (
@@ -453,7 +566,18 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:320
                     -- 使用统一的生成算法
                     local newObj = generateDashedShape shapeObj spn1.value spn2.value spn3.value spn4.value chkPlane.checked onLinear.checked
                     if newObj != undefined then
+                    (
+                        -- 如果勾选了四边形化，添加Quadify_Mesh修改器
+                        if chkQuadify.checked and chkPlane.checked then
+                        (
+                            select newObj
+                            modPanel.addModToSelection (Quadify_Mesh ()) ui:on
+                            newObj.modifiers[#Quadify_Mesh].quadsize = spnQuadSize.value
+                            -- 执行转换为多边形的宏命令
+                            macros.run "Modifier Stack" "Convert_to_Poly"
+                        )
                         append resultObjects newObj
+                    )
                 )
                 
                 -- 删除原始对象（静默处理）

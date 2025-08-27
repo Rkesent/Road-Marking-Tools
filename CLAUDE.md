@@ -6,6 +6,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a collection of 3ds Max tools for road marking and terrain design, written in MAXScript. The tools are designed for 3D modeling workflows in 3ds Max, focusing on traffic guidance lines, terrain tools, and dashed road markings.
 
+## Common Development Commands
+
+### Loading Tools in 3ds Max
+```maxscript
+-- Load individual tools in script editor
+filein "TrafficGuideLine.ms"
+filein "VShapeGenerator.ms"
+filein "DashedShape-2.0.0.ms" 
+filein "Terrain tool.ms"
+
+-- Load all tools at once
+files = getFiles @"C:\path\to\Road-Marking-Tools\*.ms"
+for f in files do filein f
+```
+
+### Function Definition Cleanup (Essential before reloading)
+```maxscript
+-- Clear all tool functions before reloading to prevent conflicts
+try (calculateCenterPath = undefined) catch()
+try (calculateSingleVShapePoints = undefined) catch()
+try (createVShapeGeometry = undefined) catch()
+try (calculateDashedSegments = undefined) catch()
+```
+
+### Testing and Validation
+```maxscript
+-- Test TrafficGuideLine with sample splines
+spline1 = $Line001  -- Select first boundary spline
+spline2 = $Line002  -- Select second boundary spline
+tgl_selectedSplines = #(spline1, spline2)
+tgl_previewEnabled = true  -- Enable preview mode
+
+-- Test VShapeGenerator on selected spline
+vsg_selectedSpline = selection[1]  -- Use currently selected spline
+vsg_previewEnabled = true
+```
+
 ## Architecture
 
 ### Core Components
@@ -16,6 +53,14 @@ This is a collection of 3ds Max tools for road marking and terrain design, writt
 - Features real-time preview system with viewport callbacks
 - Handles spline intersection analysis and generates closure lines when boundaries don't meet
 - Core algorithms in `calculateCenterPath`, `calculateVShapePositions`, and `createVShapeModel`
+- Integrates with VShapeGenerator for enhanced V-shape calculation using `calculateSingleVShapePoints`
+
+**VShapeGenerator.ms** - V-shape line segment generator (v1.0.0)
+- Generates adjustable V-shaped line segments and instances them onto splines
+- Supports configurable arm length, AC distance, and instance spacing parameters
+- Features dual V-shape generation with controllable spacing between V-shapes
+- Includes spline-to-surface conversion capabilities for road marking visualization
+- Core functions: `calculateVShapePoints`, `createVShapeGeometry`, `instanceVShapeOnSpline`
 
 **DashedShape-2.0.0.ms** - Dashed line pattern generator (v2.0.0)
 - Creates dashed road marking patterns with configurable solid/gap lengths
@@ -51,6 +96,7 @@ This is a collection of 3ds Max tools for road marking and terrain design, writt
 ```maxscript
 -- Load individual tools in 3ds Max script editor
 filein "TrafficGuideLine.ms"
+filein "VShapeGenerator.ms"
 filein "DashedShape-2.0.0.ms" 
 filein "Terrain tool.ms"
 
@@ -61,6 +107,7 @@ fileIn @"C:\path\to\Road-Marking-Tools\*.ms"
 ### Global Variable Management
 Each tool uses prefixed global variables to avoid conflicts:
 - **TrafficGuideLine**: `tgl_*` prefix (e.g., `tgl_previewEnabled`, `tgl_vSpacing`)
+- **VShapeGenerator**: `vsg_*` prefix (e.g., `vsg_armLength`, `vsg_acDistance`, `vsg_instanceSpacing`)
 - **DashedShape**: `ds_*` prefix (e.g., `ds_solidLength`, `ds_gapLength`)  
 - **Terrain Tool**: `mlpt_*` prefix (e.g., `mlpt_populate_path`)
 
@@ -81,10 +128,10 @@ try (functionName = undefined) catch()
 - Standard V-shape: 300mm arm length, 60° angle, 100mm width
 
 ### Preview System and UI Architecture
-- Preview enabled through tool-specific global flags (`tgl_previewEnabled`, `ds_previewEnabled`)
+- Preview enabled through tool-specific global flags (`tgl_previewEnabled`, `vsg_previewEnabled`, `ds_previewEnabled`)
 - Uses `drawTrafficGuidePreview` and viewport callbacks for real-time visualization
 - Automatically registers/unregisters viewport callbacks on dialog open/close
-- Color-coded previews: Traffic Guide (yellow), Dashed Shape (green)
+- Color-coded previews: Traffic Guide (yellow), V-Shape Generator (orange), Dashed Shape (green)
 
 ### Algorithm Characteristics and Constraints
 
@@ -100,6 +147,12 @@ try (functionName = undefined) catch()
 - Special case handling for gap=0 (continuous lines) vs gap>0 (dashed patterns)
 - Linear interpolation mode available for complex curve scenarios
 - Memory-efficient segment calculation without intermediate geometry creation
+
+**VShapeGenerator Parameters**:
+- Configurable arm length (default 300mm) and AC distance (default 200mm) for precise V-shape geometry
+- Instance spacing controls placement frequency along splines (default 500mm)
+- Dual V-shape mode with adjustable spacing between paired V-shapes (default 200mm)
+- Surface generation with configurable width (100mm) and subdivision count (20) for mesh optimization
 
 **Terrain Tool Performance**:
 - Cached polyOp/meshOp operations reduce memory leaks and improve speed
@@ -117,7 +170,8 @@ try (functionName = undefined) catch()
 
 ## Version History and Key Changes
 
-**TrafficGuideLine v1.0.0**: Complete rewrite with improved intersection analysis
+**TrafficGuideLine v1.0.0**: Complete rewrite with improved intersection analysis and VShapeGenerator integration
+**VShapeGenerator v1.0.0**: New component for enhanced V-shape calculation and spline-to-surface conversion
 **DashedShape v2.0.0**: Major refactor ensuring preview-generation algorithm consistency  
 **Terrain Tool v1.5**: Performance optimizations with cached mesh operations
 

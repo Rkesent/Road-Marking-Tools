@@ -554,6 +554,77 @@ fn generateVShapes splineObj armLength acDistance spacing vShapeDistance:200.0 =
 )
 
 -------
+-- 基于双V字形点集创建片面模型
+-- 参数：
+--   dualVPoints: #(#(pointA1, pointB1, pointC1), #(pointA2, pointB2, pointC2)) 双V字形点集
+--   objName: 对象名称
+-- 返回：创建的mesh对象
+-------
+fn createDualVShapeSurface dualVPoints objName:"DualVShapeSurface" =
+(
+    try
+    (
+        if dualVPoints == undefined or dualVPoints.count != 2 then
+        (
+            messageBox "无效的双V字形点集！" title:"错误"
+            return undefined
+        )
+        
+        local vShape1 = dualVPoints[1]  -- 第一个V字形的三个点
+        local vShape2 = dualVPoints[2]  -- 第二个V字形的三个点
+        
+        if vShape1.count != 3 or vShape2.count != 3 then
+        (
+            messageBox "V字形点集格式错误！" title:"错误"
+            return undefined
+        )
+        
+        -- 定义顶点数组（6个顶点：两个V字形各3个点）
+        local verts = #()
+        append verts vShape1[1]  -- A1
+        append verts vShape1[2]  -- B1
+        append verts vShape1[3]  -- C1
+        append verts vShape2[1]  -- A2
+        append verts vShape2[2]  -- B2
+        append verts vShape2[3]  -- C2
+        
+        -- 定义面片（连接两个V字形形成表面）
+        local faces = #()
+        
+        -- 连接A1-B1-A2形成三角形
+        append faces [1, 2, 4]  -- A1, B1, A2
+        
+        -- 连接B1-B2-A2形成三角形
+        append faces [2, 5, 4]  -- B1, B2, A2
+        
+        -- 连接B1-C1-B2形成三角形
+        append faces [2, 3, 5]  -- B1, C1, B2
+        
+        -- 连接C1-C2-B2形成三角形
+        append faces [3, 6, 5]  -- C1, C2, B2
+        
+        -- 创建mesh对象
+        local surfaceMesh = mesh vertices:verts faces:faces
+        surfaceMesh.name = objName
+        
+        -- 设置材质ID
+        for i = 1 to surfaceMesh.numfaces do
+        (
+            setFaceMatID surfaceMesh i 1
+        )
+        
+        -- 更新mesh
+        update surfaceMesh
+        
+        return surfaceMesh
+    )
+    catch
+    (
+        return undefined
+    )
+)
+
+-------
 -- 生成片面模型函数
 -------
 fn generateSplineSurface splineObj width subdivisions =
@@ -578,9 +649,43 @@ fn generateSplineSurface splineObj width subdivisions =
 )
 
 -------
+-- 基于双V字形参数生成片面模型函数
+-- 参数：
+--   centerPos: 中心位置
+--   direction: 前进方向向量
+--   armLength: 臂长
+--   acDistance: A、C两点间距离
+--   vShapeDistance: 两个V字形之间的距离
+-- 返回：创建的mesh对象
+-------
+fn generateDualVShapeSurface centerPos direction armLength acDistance vShapeDistance =
+(
+    try
+    (
+        -- 计算双V字形点集
+        local dualVPoints = calculateDualVShapePoints centerPos direction armLength acDistance vShapeDistance
+        
+        if dualVPoints != undefined then
+        (
+            -- 创建片面模型
+            local surfaceObj = createDualVShapeSurface dualVPoints objName:("DualVShapeSurface_" + (timestamp() as string))
+            return surfaceObj
+        )
+        else
+        (
+            return undefined
+        )
+    )
+    catch
+    (
+        return undefined
+    )
+)
+
+-------
 -- 用户界面
 -------
-rollout VShapeGeneratorRol "V字形线段生成器 v1.4.0" width:220 height:505
+rollout VShapeGeneratorRol "V字形线段生成器 v1.4.0" width:220 height:530
 (
     groupBox 'grp1' "样条线选择" pos:[8,8] width:204 height:60 align:#left
     button 'btnSelectSpline' "选择样条线" pos:[15,25] width:80 height:25 align:#left
@@ -601,26 +706,28 @@ rollout VShapeGeneratorRol "V字形线段生成器 v1.4.0" width:220 height:505
     
     checkbox 'chkPreview' "显示预览" pos:[15,195] width:80 height:20 align:#left
     
-    groupBox 'grp3' "片面生成" pos:[8,225] width:204 height:90 align:#left
+    groupBox 'grp3' "片面生成" pos:[8,225] width:204 height:115 align:#left
     label 'lblSurfaceWidth' "片面宽度:" pos:[15,245] width:70 height:15 align:#left
     spinner 'spnSurfaceWidth' "" pos:[110,245] width:90 height:16 range:[10,500,100] type:#float align:#left
     
     label 'lblSubdivisions' "细分数:" pos:[15,270] width:70 height:15 align:#left
     spinner 'spnSubdivisions' "" pos:[110,270] width:90 height:16 range:[5,100,20] type:#integer align:#left
     
-    button 'btnGenerateSurface' "生成片面模型" pos:[50,290] width:120 height:20 align:#left
+    button 'btnGenerateSurface' "生成样条线片面" pos:[15,290] width:90 height:20 align:#left
+    button 'btnGenerateDualVSurface' "生成双V片面" pos:[115,290] width:85 height:20 align:#left
+    button 'btnGenerateVShapeSurface' "生成单点双V片面" pos:[50,315] width:120 height:20 align:#left
     
-    groupBox 'grp4' "V字形操作" pos:[8,325] width:204 height:40 align:#left
-    button 'btnGenerate' "生成V字形线段" pos:[50,340] width:120 height:20 align:#left
+    groupBox 'grp4' "V字形操作" pos:[8,350] width:204 height:40 align:#left
+    button 'btnGenerate' "生成V字形线段" pos:[50,365] width:120 height:20 align:#left
     
-    groupBox 'grp5' "使用说明" pos:[8,375] width:204 height:125 align:#left
-    label 'lblHelp1' "1. 选择一条或多条样条线" pos:[15,395] width:180 height:15 align:#left
-    label 'lblHelp2' "2. 调整V字形参数:" pos:[15,415] width:120 height:15 align:#left
-    label 'lblHelp3' "   - 臂长: A到B点距离" pos:[15,430] width:150 height:15 align:#left
-    label 'lblHelp4' "   - A-C距离: 底边宽度" pos:[15,445] width:150 height:15 align:#left
-    label 'lblHelp5' "   - 实例间距: V字形间隔" pos:[15,460] width:150 height:15 align:#left
-    label 'lblHelp6' "   - 上下间距: 双V垂直距离" pos:[15,475] width:150 height:15 align:#left
-    label 'lblHelp7' "3. 启用预览查看效果" pos:[15,490] width:150 height:15 align:#left
+    groupBox 'grp5' "使用说明" pos:[8,400] width:204 height:125 align:#left
+    label 'lblHelp1' "1. 选择一条或多条样条线" pos:[15,420] width:180 height:15 align:#left
+    label 'lblHelp2' "2. 调整V字形参数:" pos:[15,440] width:120 height:15 align:#left
+    label 'lblHelp3' "   - 臂长: A到B点距离" pos:[15,455] width:150 height:15 align:#left
+    label 'lblHelp4' "   - A-C距离: 底边宽度" pos:[15,470] width:150 height:15 align:#left
+    label 'lblHelp5' "   - 实例间距: V字形间隔" pos:[15,485] width:150 height:15 align:#left
+    label 'lblHelp6' "   - 上下间距: 双V垂直距离" pos:[15,500] width:150 height:15 align:#left
+    label 'lblHelp7' "3. 启用预览查看效果" pos:[15,515] width:150 height:15 align:#left
     
     -- 预览更新函数
     fn updateVShapePreview =
@@ -812,6 +919,105 @@ rollout VShapeGeneratorRol "V字形线段生成器 v1.4.0" width:220 height:505
             else
             (
                 messageBox "生成失败，请检查参数设置！" title:"错误"
+            )
+        )
+    )
+    
+    on btnGenerateDualVSurface pressed do
+    (
+        if vsg_selectedSpline == undefined then
+        (
+            messageBox "请先选择一条样条线！" title:"错误"
+            return()
+        )
+        
+        undo on
+        (
+            -- 关闭预览
+            if chkPreview.checked then
+            (
+                chkPreview.checked = false
+                vsg_previewEnabled = false
+                unregisterVShapePreview()
+            )
+            
+            -- 收集参数
+            local armLength = spnArmLength.value
+            local acDistance = spnAcDistance.value
+            local spacing = spnSpacing.value
+            local vShapeDistance = spnVShapeDistance.value
+            
+            -- 更新全局参数
+            vsg_armLength = armLength
+            vsg_acDistance = acDistance
+            vsg_instanceSpacing = spacing
+            vsg_vShapeDistance = vShapeDistance
+            
+            -- 沿样条线生成多个双V字形片面
+            local surfaceObjects = #()
+            local splineLength = curveLength vsg_selectedSpline
+            local numInstances = (splineLength / spacing) as integer
+            
+            if numInstances > 0 then
+            (
+                for i = 0 to numInstances do
+                (
+                    local param = i as float / numInstances as float
+                    if param > 1.0 then param = 1.0
+                    
+                    -- 获取样条线上的位置和方向
+                    local currentPos = lengthInterp vsg_selectedSpline 1 param
+                    local tangentDir = normalize (lengthTangent vsg_selectedSpline 1 param)
+                    
+                    -- 生成双V字形片面
+                    local surfaceObj = generateDualVShapeSurface currentPos tangentDir armLength acDistance vShapeDistance
+                    
+                    if surfaceObj != undefined then
+                    (
+                        append surfaceObjects surfaceObj
+                    )
+                )
+                
+                if surfaceObjects.count > 0 then
+                (
+                    select surfaceObjects
+                    messageBox ("成功生成双V字形片面！\n生成了 " + surfaceObjects.count as string + " 个片面对象") title:"完成"
+                )
+                else
+                (
+                    messageBox "生成失败！" title:"错误"
+                )
+            )
+            else
+            (
+                messageBox "样条线长度不足或间距过大！" title:"错误"
+            )
+        )
+    )
+    
+    on btnGenerateVShapeSurface pressed do
+    (
+        undo on
+        (
+            -- 收集参数
+            local armLength = spnArmLength.value
+            local acDistance = spnAcDistance.value
+            local vShapeDistance = spnVShapeDistance.value
+            
+            -- 在世界原点生成单个双V字形片面
+            local centerPos = [0, 0, 0]
+            local direction = [1, 0, 0]  -- X轴正方向
+            
+            local surfaceObj = generateDualVShapeSurface centerPos direction armLength acDistance vShapeDistance
+            
+            if surfaceObj != undefined then
+            (
+                select surfaceObj
+                messageBox ("成功生成单点双V字形片面！\n对象名称: " + surfaceObj.name + "\n顶点数: " + surfaceObj.numverts as string + "\n面数: " + surfaceObj.numfaces as string) title:"完成"
+            )
+            else
+            (
+                messageBox "生成失败！" title:"错误"
             )
         )
     )
