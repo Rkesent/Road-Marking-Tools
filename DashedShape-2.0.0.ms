@@ -12,84 +12,185 @@ global ds_gapLength = 900  -- 采样点之间的距离间隔
 global ds_lineWidth = 40
 global ds_lineThickness = 0
 global ds_useLinear = false
+global ds_mode = 1  -- 1=虚线模式, 2=实线模式
+global ds_offsetDistance = 0  -- 偏移距离
+global ds_translateOffset = false  -- 是否启用平移偏移
 
 -------
--- 核心算法：基于固定采样间隔的虚线分割逻辑
--- 这个函数负责计算虚线段的位置，预览和生成都使用这个函数
+-- 核心算法：虚线和实线的统一生成逻辑
+-- 虚线模式：基于固定采样间隔的虚线分割逻辑
+-- 实线模式：基于样条线本身结构的连续线段生成
 -- solidLen: 虚线长度（距离单位）
--- gapDist: 采样点之间的距离间隔（距离单位）
+-- gapDist: 采样点之间的距离间隔（距离单位，实线模式时为0）
+-- useLinear: 是否使用线性模式
+-- isRealSolid: 是否为真正的实线模式（区别于gapDist=0的连续虚线）
 -------
-fn calculateDashedSegments splineObj splineIdx solidLen gapDist =
+fn calculateDashedSegments splineObj splineIdx solidLen gapDist useLinear isRealSolid offsetDist translateOffset =
 (
     local result = #()
     local splineLength = curveLength splineObj splineIdx
     
-    if solidLen > 0 and splineLength > 0 then
+    if splineLength > 0 then
     (
-        if gapDist <= 0.001 then
+        if isRealSolid then
         (
-            -- 特殊情况：间隔为0，生成连续实线
-            -- 按solidLen分割，连续排列
-            local numSegments = (splineLength / solidLen) as integer
-            local remainder = splineLength - (numSegments * solidLen)
-            
-            -- 生成完整的实线段
-            for segIdx = 1 to numSegments do
+            -- 实线模式：基于样条线本身结构生成连续线段
+            if useLinear then
             (
-                local segStartDist = (segIdx - 1) * solidLen
-                local segEndDist = segStartDist + solidLen
-                
-                local startParam = segStartDist / splineLength
-                local endParam = segEndDist / splineLength
-                
-                local startPos = lengthInterp splineObj splineIdx startParam
-                local endPos = lengthInterp splineObj splineIdx endParam
-                
-                append result #(startPos, endPos)
+                -- 线性模式：按样条线的节点数量分段
+                local knotCount = numKnots splineObj splineIdx
+                if knotCount >= 2 then
+                (
+                    for knotIdx = 1 to (knotCount - 1) do
+                    (
+                        local startParam = (knotIdx - 1) as float / (knotCount - 1) as float
+                        local endParam = knotIdx as float / (knotCount - 1) as float
+                        
+                        local startPos = lengthInterp splineObj splineIdx startParam
+                        local endPos = lengthInterp splineObj splineIdx endParam
+                        
+                        append result #(startPos, endPos)
+                    )
+                )
             )
-            
-            -- 处理剩余部分（如果有的话）
-            if remainder > 0.001 then
+            else
             (
-                local lastStartDist = numSegments * solidLen
-                local lastStartParam = lastStartDist / splineLength
-                local lastEndParam = 1.0  -- 到样条线末尾
+                -- 弧度模式：根据样条线的曲率自适应采样
+                local segCount = numSegments splineObj splineIdx
+                if segCount > 0 then
+                (
+                    for segIdx = 1 to segCount do
+                    (
+                        local startParam = (segIdx - 1) as float / segCount as float
+                        local endParam = segIdx as float / segCount as float
+                        
+                        local startPos = lengthInterp splineObj splineIdx startParam
+                        local endPos = lengthInterp splineObj splineIdx endParam
+                        
+                        append result #(startPos, endPos)
+                    )
+                )
+            )
+        )
+        else if gapDist <= 0.001 then
+        (
+            -- 连续虚线模式：按solidLen分割，连续排列
+            if solidLen > 0 then
+            (
+                local numSegments = (splineLength / solidLen) as integer
+                local remainder = splineLength - (numSegments * solidLen)
                 
-                local startPos = lengthInterp splineObj splineIdx lastStartParam
-                local endPos = lengthInterp splineObj splineIdx lastEndParam
+                -- 生成完整的实线段
+                for segIdx = 1 to numSegments do
+                (
+                    local segStartDist = (segIdx - 1) * solidLen
+                    local segEndDist = segStartDist + solidLen
+                    
+                    local startParam = segStartDist / splineLength
+                    local endParam = segEndDist / splineLength
+                    
+                    local startPos = lengthInterp splineObj splineIdx startParam
+                    local endPos = lengthInterp splineObj splineIdx endParam
+                    
+                    append result #(startPos, endPos)
+                )
                 
-                append result #(startPos, endPos)
+                -- 处理剩余部分（如果有的话）
+                if remainder > 0.001 then
+                (
+                    local lastStartDist = numSegments * solidLen
+                    local lastStartParam = lastStartDist / splineLength
+                    local lastEndParam = 1.0  -- 到样条线末尾
+                    
+                    local startPos = lengthInterp splineObj splineIdx lastStartParam
+                    local endPos = lengthInterp splineObj splineIdx lastEndParam
+                    
+                    append result #(startPos, endPos)
+                )
             )
         )
         else
         (
-            -- 基于固定采样间隔的虚线生成
-            -- 采样点按固定距离间隔分布，虚线段在这些采样点上生成
-            local currentDist = 0.0
-            
-            while currentDist < splineLength do
+            -- 虚线模式：基于固定采样间隔的虚线生成
+            if solidLen > 0 then
             (
-                -- 计算当前虚线段的起始和结束距离
-                local segStartDist = currentDist
-                local segEndDist = currentDist + solidLen
+                local currentDist = 0.0
                 
-                -- 确保不超出样条线长度
-                if segStartDist >= splineLength then break
-                if segEndDist > splineLength then segEndDist = splineLength
-                
-                -- 转换为参数
-                local startParam = segStartDist / splineLength
-                local endParam = segEndDist / splineLength
-                
-                -- 计算3D位置
-                local startPos = lengthInterp splineObj splineIdx startParam
-                local endPos = lengthInterp splineObj splineIdx endParam
-                
-                append result #(startPos, endPos)
-                
-                -- 移动到下一个采样点位置（固定间隔距离）
-                currentDist += gapDist
+                while currentDist < splineLength do
+                (
+                    -- 计算当前虚线段的起始和结束距离
+                    local segStartDist = currentDist
+                    local segEndDist = currentDist + solidLen
+                    
+                    -- 确保不超出样条线长度
+                    if segStartDist >= splineLength then break
+                    if segEndDist > splineLength then segEndDist = splineLength
+                    
+                    -- 转换为参数
+                    local startParam = segStartDist / splineLength
+                    local endParam = segEndDist / splineLength
+                    
+                    -- 计算3D位置
+                    local startPos = lengthInterp splineObj splineIdx startParam
+                    local endPos = lengthInterp splineObj splineIdx endParam
+                    
+                    append result #(startPos, endPos)
+                    
+                    -- 移动到下一个采样点位置（固定间隔距离）
+                    currentDist += gapDist
+                )
             )
+        )
+    )
+    
+    -- 应用偏移处理
+    if offsetDist != 0 and result.count > 0 then
+    (
+        for i = 1 to result.count do
+        (
+            local segment = result[i]
+            local startPos = segment[1]
+            local endPos = segment[2]
+            
+            -- 计算线段方向和垂直方向
+            local segmentDir = normalize (endPos - startPos)
+            local perpDir = normalize (cross segmentDir [0,0,1])
+            
+            if translateOffset then
+             (
+                 -- 平移偏移：线段沿垂直方向偏移
+                 local offsetVector = perpDir * offsetDist
+                 local newStartPos = startPos + offsetVector
+                 local newEndPos = endPos + offsetVector
+                 
+                 result[i] = #(newStartPos, newEndPos)
+             )
+             else
+             (
+                 -- 旋转偏移：线段绕中心点旋转（默认模式）
+                 local centerPos = (startPos + endPos) / 2.0
+                 local segmentLength = distance startPos endPos
+                 
+                 -- 将偏移距离乘以100后作为旋转角度（度数）
+                 local rotAngleRad = degToRad (offsetDist * 100.0)
+                 
+                 -- 计算线段的原始方向向量
+                 local originalDir = normalize (endPos - startPos)
+                 
+                 -- 应用Z轴旋转：顺时针为正值，逆时针为负值
+                 local cosAngle = cos rotAngleRad
+                 local sinAngle = sin rotAngleRad
+                 local rotatedDir = [originalDir.x * cosAngle - originalDir.y * sinAngle,
+                                    originalDir.x * sinAngle + originalDir.y * cosAngle,
+                                    originalDir.z]
+                 
+                 -- 计算旋转后的新端点位置
+                 local halfSegment = rotatedDir * (segmentLength / 2.0)
+                 local newStartPos = centerPos - halfSegment
+                 local newEndPos = centerPos + halfSegment
+                 
+                 result[i] = #(newStartPos, newEndPos)
+             )
         )
     )
     
@@ -99,7 +200,7 @@ fn calculateDashedSegments splineObj splineIdx solidLen gapDist =
 -------
 -- 预览绘制函数
 -------
-fn drawDashedPreview objs solidLen gapLen lineWidth lineThickness generatePlane =
+fn drawDashedPreview objs solidLen gapLen lineWidth lineThickness generatePlane useLinear isRealSolid =
 (
     if objs.count > 0 then
     (
@@ -113,7 +214,7 @@ fn drawDashedPreview objs solidLen gapLen lineWidth lineThickness generatePlane 
                 for splineIdx = 1 to numSplines obj do
                 (
                     -- 使用统一的核心算法计算线段位置
-                    local segments = calculateDashedSegments obj splineIdx solidLen gapLen
+                    local segments = calculateDashedSegments obj splineIdx solidLen gapLen useLinear isRealSolid ds_offsetDistance ds_translateOffset
                     local halfWidth = if lineWidth > 0 then lineWidth / 2.0 else 0.5
                     
                     -- 绘制每个线段
@@ -260,14 +361,17 @@ fn generateDashedShape sourceObj solidLen gapLen lineWidth lineThickness generat
     local newObj = copy sourceObj
     convertToSplineShape newObj
     
+    -- 判断是否为真正的实线模式
+    local isRealSolid = (ds_mode == 2)
+    
     -- 创建新的样条线形状来存储结果
-    local resultShape = Line pos:[0,0,0] name:(sourceObj.name + "_Dashed")
+    local resultShape = Line pos:[0,0,0] name:(sourceObj.name + (if isRealSolid then "_Solid" else "_Dashed"))
     convertToSplineShape resultShape
     
     for splineIdx = 1 to numSplines newObj do
     (
         -- 使用与预览完全相同的核心算法
-        local segments = calculateDashedSegments newObj splineIdx solidLen gapLen
+        local segments = calculateDashedSegments newObj splineIdx solidLen gapLen useLinear isRealSolid ds_offsetDistance ds_translateOffset
         
         -- 为每个线段创建样条线
         for segment in segments do
@@ -326,7 +430,8 @@ fn initDashedPreview =
     (
         if ds_previewEnabled and ds_selectedObjs.count > 0 then
         (
-            drawDashedPreview ds_selectedObjs ds_solidLength ds_gapLength ds_lineWidth ds_lineThickness (chkPlane != undefined and chkPlane.checked)
+            local isRealSolid = (ds_mode == 2)
+            drawDashedPreview ds_selectedObjs ds_solidLength ds_gapLength ds_lineWidth ds_lineThickness (chkPlane != undefined and chkPlane.checked) ds_useLinear isRealSolid
         )
     )
     catch()
@@ -349,26 +454,38 @@ fn unregisterPreview =
 -- 用户界面
 -------
 try destroyDialog DashedShapeRol catch()
-rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
+rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
 (
-    groupBox 'grp1' "参数" pos:[8,8] width:189 height:170 align:#left
-    spinner 'spn1' "虚线长度：" pos:[17,25] width:135 height:20 range:[0,10000,300] type:#worldunits scale:0.01
-    spinner 'spn2' "采样间隔：" pos:[17,50] width:135 height:20 range:[0,10000,500] type:#worldunits scale:0.01
-    spinner 'spn3' "虚线宽度：" pos:[17,75] width:135 height:20 range:[0,10000,40] type:#worldunits scale:0.01
-    spinner 'spn4' "虚线厚度：" pos:[17,100] width:135 height:20 range:[0,10000,0] type:#worldunits scale:0.01
-    checkbox 'onLinear' "线性" pos:[10,125] width:40 height:22 align:#left
-    checkbox 'chkPlane' "生成平面" pos:[80,125] width:70 height:22 align:#left
-    checkbox 'chkPreview' "显示预览" pos:[10,150] width:70 height:22 align:#left
-    checkbox 'chkQuadify' "四边形化" pos:[80,150] width:70 height:22 align:#left
-    spinner 'spnQuadSize' "" pos:[150,155] width:30 height:22 range:[1,100,20] type:#integer
+    -- 模式选择
+    groupBox 'grpMode' "模式" pos:[8,8] width:189 height:50 align:#left
+    radiobuttons 'rdoMode' "" pos:[20,25] width:165 height:22 labels:#("虚线", "实线") default:1 columns:2 align:#left
     
-    groupBox 'grp2' "预设" pos:[8,185] width:189 height:100 align:#left
-    button 'btnPreset1' "中短线" pos:[17,205] width:55 height:25 tooltip:"虚线长度:200\n采样间隔:600\n宽度:30"
-    button 'btnPreset2' "斑马线" pos:[75,205] width:55 height:25 tooltip:"虚线长度:50\n采样间隔:101\n宽度:520"
-    button 'btnPreset3' "高架桥69线" pos:[133,205] width:55 height:25 tooltip:"虚线长度:620\n采样间隔:1510\n宽度:30"
-    button 'btnPreset4' "停车线" pos:[17,235] width:55 height:25 tooltip:"虚线长度:100\n采样间隔:200\n宽度:50"
+    -- 参数设置
+    groupBox 'grp1' "参数" pos:[8,65] width:189 height:220 align:#left
+    spinner 'spn1' "虚线长度：" pos:[17,82] width:135 height:20 range:[0,10000,300] type:#worldunits scale:0.01
+    spinner 'spn2' "采样间隔：" pos:[17,107] width:135 height:20 range:[0,10000,500] type:#worldunits scale:0.01
+    spinner 'spn3' "线条宽度：" pos:[17,132] width:135 height:20 range:[0,10000,40] type:#worldunits scale:0.01
+    spinner 'spn4' "线条厚度：" pos:[17,157] width:135 height:20 range:[0,10000,0] type:#worldunits scale:0.01
+    spinner 'spnOffset' "旋转角度：" pos:[17,182] width:135 height:20 range:[-360,360,0] type:#float scale:1.0
+    checkbox 'onLinear' "线性" pos:[10,207] width:40 height:22 align:#left
+    checkbox 'chkPlane' "生成平面" pos:[80,207] width:70 height:22 align:#left
+    checkbox 'chkRotateOffset' "平移偏移" pos:[10,232] width:70 height:22 align:#left
+    checkbox 'chkPreview' "显示预览" pos:[80,232] width:70 height:22 align:#left
+    checkbox 'chkQuadify' "四边形化" pos:[10,257] width:70 height:22 align:#left
+    spinner 'spnQuadSize' "" pos:[80,262] width:30 height:22 range:[1,100,20] type:#integer
     
-    button genBtn "生成" pos:[44,295] width:120 height:40
+    groupBox 'grp2' "预设" pos:[8,292] width:189 height:130 align:#left
+    button 'btnPreset1' "中短线" pos:[17,312] width:55 height:25 tooltip:"虚线长度:200\n采样间隔:600\n宽度:30"
+    button 'btnPreset2' "斑马线" pos:[75,312] width:55 height:25 tooltip:"虚线长度:50\n采样间隔:101\n宽度:520"
+    button 'btnPreset3' "高架桥69线" pos:[133,312] width:55 height:25 tooltip:"虚线长度:620\n采样间隔:1510\n宽度:30"
+    button 'btnPreset4' "停车线" pos:[17,342] width:55 height:25 tooltip:"虚线长度:100\n采样间隔:200\n宽度:50"
+    button 'btnPreset5' "路口引导线" pos:[75,342] width:55 height:25 tooltip:"虚线长度:100\n采样间隔:200\n宽度:25"
+    button 'btnPreset6' "待转线" pos:[133,342] width:55 height:25 tooltip:"虚线长度:50\n采样间隔:90\n宽度:20"
+    button 'btnPreset7' "实线" pos:[17,372] width:55 height:25 tooltip:"连续实线\n宽度:100"
+    button 'btnPreset8' "双实线" pos:[75,372] width:55 height:25 tooltip:"双实线\n宽度:150"
+    button 'btnPreset9' "边界线" pos:[133,372] width:55 height:25 tooltip:"边界线\n宽度:200"
+    
+    button genBtn "生成" pos:[44,432] width:120 height:40
     
     -- 更新预览
     fn updatePreview =
@@ -377,12 +494,49 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
         (
             ds_selectedObjs = selection as array
             ds_solidLength = spn1.value
-            ds_gapLength = spn2.value
+            ds_gapLength = if ds_mode == 1 then spn2.value else 0  -- 实线模式时间隔为0
             ds_lineWidth = spn3.value
             ds_lineThickness = spn4.value
             ds_useLinear = onLinear.checked
             redrawviews()
         )
+    )
+    
+    -- 更新UI界面状态
+    fn updateUIState =
+    (
+        case rdoMode.state of
+        (
+            1: -- 虚线模式
+            (
+                spn1.caption = "虚线长度："
+                spn1.enabled = true
+                spn2.enabled = true
+                spn3.caption = "线条宽度："
+                ds_mode = 1
+            )
+            2: -- 实线模式
+            (
+                spn1.caption = "（无需设置）"
+                spn1.enabled = false  -- 实线模式下不需要分段长度参数
+                spn2.enabled = false  -- 实线模式下不需要采样间隔参数
+                spn3.caption = "线条宽度："
+                ds_mode = 2
+            )
+        )
+        
+        -- 根据偏移模式更新偏移参数的标签
+        if chkRotateOffset.checked then
+            spnOffset.caption = "偏移距离："
+        else
+            spnOffset.caption = "旋转角度："
+        
+        -- 同步偏移参数到全局变量
+        ds_offsetDistance = spnOffset.value
+        ds_translateOffset = chkRotateOffset.checked
+        
+        -- 调用更新预览（现在updatePreview已经定义了）
+        updatePreview()
     )
     
     -- 界面事件
@@ -397,11 +551,20 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
         chkQuadify.enabled = false
         spnQuadSize.enabled = false
         
+        -- 初始化为虚线模式
+        rdoMode.state = 1
+        ds_mode = 1
+        
         ds_solidLength = spn1.value
         ds_gapLength = spn2.value
         ds_lineWidth = spn3.value
         ds_lineThickness = spn4.value
         ds_useLinear = onLinear.checked
+        ds_offsetDistance = spnOffset.value
+        ds_translateOffset = chkRotateOffset.checked
+        
+        -- 最后调用UI状态更新（此时所有控件都已初始化）
+        updateUIState()
     )
     
     on DashedShapeRol close do
@@ -428,11 +591,56 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
         )
     )
     
+    on rdoMode changed state do updateUIState()
     on spn1 changed val do updatePreview()
     on spn2 changed val do updatePreview()
     on spn3 changed val do updatePreview()
     on spn4 changed val do updatePreview()
     on onLinear changed state do updatePreview()
+    
+    -- 鼠标滚轮控制事件
+    on spn1 mouseWheel delta do
+    (
+        local step = 50  -- 虚线长度步长
+        spn1.value = spn1.value + (if delta > 0 then step else -step)
+        updatePreview()
+    )
+    
+    on spn2 mouseWheel delta do
+    (
+        local step = 50  -- 采样间隔步长
+        spn2.value = spn2.value + (if delta > 0 then step else -step)
+        updatePreview()
+    )
+    
+    on spn3 mouseWheel delta do
+    (
+        local step = 10  -- 线条宽度步长
+        spn3.value = spn3.value + (if delta > 0 then step else -step)
+        updatePreview()
+    )
+    
+    on spn4 mouseWheel delta do
+    (
+        local step = 5   -- 线条厚度步长
+        spn4.value = spn4.value + (if delta > 0 then step else -step)
+        updatePreview()
+    )
+    
+    on spnOffset mouseWheel delta do
+    (
+        local step = if ds_translateOffset then 50 else 0.05  -- 平移模式50，旋转模式0.05（相当于5度）
+        spnOffset.value = spnOffset.value + (if delta > 0 then step else -step)
+        ds_offsetDistance = spnOffset.value
+        if ds_previewEnabled and selection.count > 0 then
+            updatePreview()
+    )
+    
+    on spnQuadSize mouseWheel delta do
+    (
+        local step = 1   -- 四边形化大小步长
+        spnQuadSize.value = spnQuadSize.value + (if delta > 0 then step else -step)
+    )
     
     on chkPlane changed state do
     (
@@ -451,6 +659,7 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
     on btnPreset1 pressed do
      (
          -- 中短线：虚线长度：200 采样间隔：600，宽度：30
+         rdoMode.state = 1  -- 虚线模式
          spn1.value = 200
          spn2.value = 600
          spn3.value = 30
@@ -461,6 +670,8 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         updateUIState()
          
          -- 手动启用预览系统
          ds_previewEnabled = true
@@ -474,16 +685,19 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
     on btnPreset2 pressed do
      (
          -- 斑马线：虚线长度：50 采样间隔：101，宽度：520
+         rdoMode.state = 1  -- 虚线模式
          spn1.value = 50
          spn2.value = 101
          spn3.value = 520
          chkPlane.checked = true
          chkPreview.checked = true
          chkQuadify.checked = true
-         spnQuadSize.value = 20
+         spnQuadSize.value = 40
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         updateUIState()
          
          -- 手动启用预览系统
          ds_previewEnabled = true
@@ -497,6 +711,7 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
     on btnPreset3 pressed do
      (
          -- 高架桥69线：虚线长度：620 采样间隔：1510，宽度：30
+         rdoMode.state = 1  -- 虚线模式
          spn1.value = 620
          spn2.value = 1510
          spn3.value = 30
@@ -507,6 +722,8 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         updateUIState()
          
          -- 手动启用预览系统
          ds_previewEnabled = true
@@ -520,6 +737,7 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
     on btnPreset4 pressed do
      (
          -- 停车线：虚线长度：100 采样间隔：200，宽度：50
+         rdoMode.state = 1  -- 虚线模式
          spn1.value = 100
          spn2.value = 200
          spn3.value = 50
@@ -531,6 +749,8 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
          
+         updateUIState()
+         
          -- 手动启用预览系统
          ds_previewEnabled = true
          if selection.count > 0 then
@@ -538,6 +758,159 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
              registerPreview()
              updatePreview()
          )
+     )
+    
+    on btnPreset5 pressed do
+     (
+         -- 路口引导线：虚线长度：100 采样间隔：200，宽度：25
+         rdoMode.state = 1  -- 虚线模式
+         spn1.value = 100
+         spn2.value = 200
+         spn3.value = 25
+         chkPlane.checked = true
+         chkPreview.checked = true
+         chkQuadify.checked = true
+         spnQuadSize.value = 20
+         spn4.enabled = false
+         chkQuadify.enabled = true
+         spnQuadSize.enabled = true
+         
+         updateUIState()
+         
+         -- 手动启用预览系统
+         ds_previewEnabled = true
+         if selection.count > 0 then
+         (
+             registerPreview()
+             updatePreview()
+         )
+     )
+    
+    on btnPreset6 pressed do
+     (
+         -- 待转线：虚线长度：50 采样间隔：90，宽度：20
+         rdoMode.state = 1  -- 虚线模式
+         spn1.value = 50
+         spn2.value = 90
+         spn3.value = 20
+         chkPlane.checked = true
+         chkPreview.checked = true
+         chkQuadify.checked = true
+         spnQuadSize.value = 20
+         spn4.enabled = false
+         chkQuadify.enabled = true
+         spnQuadSize.enabled = true
+         
+         updateUIState()
+         
+         -- 手动启用预览系统
+         ds_previewEnabled = true
+         if selection.count > 0 then
+         (
+             registerPreview()
+             updatePreview()
+         )
+     )
+     
+    -- 实线预设
+    on btnPreset7 pressed do
+    (
+        -- 实线：连续实线，宽度：100
+        rdoMode.state = 2  -- 实线模式
+        spn3.value = 100  -- 只设置线条宽度
+        chkPlane.checked = true
+        chkPreview.checked = true
+        chkQuadify.checked = true
+        spnQuadSize.value = 20
+        spn4.enabled = false
+        chkQuadify.enabled = true
+        spnQuadSize.enabled = true
+        
+        updateUIState()
+        
+        -- 手动启用预览系统
+        ds_previewEnabled = true
+        if selection.count > 0 then
+        (
+            registerPreview()
+            updatePreview()
+        )
+    )
+    
+    on btnPreset8 pressed do
+    (
+        -- 双实线：连续实线，宽度：150
+        rdoMode.state = 2  -- 实线模式
+        spn3.value = 150  -- 只设置线条宽度
+        chkPlane.checked = true
+        chkPreview.checked = true
+        chkQuadify.checked = true
+        spnQuadSize.value = 20
+        spn4.enabled = false
+        chkQuadify.enabled = true
+        spnQuadSize.enabled = true
+        
+        updateUIState()
+        
+        -- 手动启用预览系统
+        ds_previewEnabled = true
+        if selection.count > 0 then
+        (
+            registerPreview()
+            updatePreview()
+        )
+    )
+    
+    on btnPreset9 pressed do
+    (
+        -- 边界线：连续实线，宽度：200
+        rdoMode.state = 2  -- 实线模式
+        spn3.value = 200  -- 只设置线条宽度
+        chkPlane.checked = true
+        chkPreview.checked = true
+        chkQuadify.checked = true
+        spnQuadSize.value = 20
+        spn4.enabled = false
+        chkQuadify.enabled = true
+        spnQuadSize.enabled = true
+        
+        updateUIState()
+        
+        -- 手动启用预览系统
+        ds_previewEnabled = true
+        if selection.count > 0 then
+        (
+            registerPreview()
+            updatePreview()
+        )
+    )
+    
+    -- 偏移距离变化事件
+    on spnOffset changed val do
+    (
+        ds_offsetDistance = val
+        if ds_previewEnabled and selection.count > 0 then
+            updatePreview()
+    )
+    
+    -- 平移偏移复选框变化事件
+     on chkRotateOffset changed state do
+     (
+         ds_translateOffset = state
+         -- 动态更新标签和参数范围
+         if state then
+         (
+             spnOffset.caption = "偏移距离："
+             spnOffset.range = [-10000,10000,0]
+         )
+         else
+         (
+             spnOffset.caption = "旋转角度："
+             spnOffset.range = [-360,360,0]  
+         )
+         
+         if ds_previewEnabled and selection.count > 0 then
+             updatePreview()
      )
     
     on genBtn pressed do
@@ -563,8 +936,10 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:350
                 
                 for shapeObj in ShapeArray do
                 (
-                    -- 使用统一的生成算法
-                    local newObj = generateDashedShape shapeObj spn1.value spn2.value spn3.value spn4.value chkPlane.checked onLinear.checked
+                    -- 使用统一的生成算法，根据模式调整参数
+                    local solidValue = if ds_mode == 1 then spn1.value else 1000  -- 实线模式下solidLen参数不重要
+                    local gapValue = if ds_mode == 1 then spn2.value else 0  -- 实线模式时间隔为0
+                    local newObj = generateDashedShape shapeObj solidValue gapValue spn3.value spn4.value chkPlane.checked onLinear.checked
                     if newObj != undefined then
                     (
                         -- 如果勾选了四边形化，添加Quadify_Mesh修改器

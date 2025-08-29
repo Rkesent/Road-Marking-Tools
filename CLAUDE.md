@@ -10,37 +10,124 @@ This is a collection of 3ds Max tools for road marking and terrain design, writt
 
 ### Loading Tools in 3ds Max
 ```maxscript
--- Load individual tools in script editor
+-- IMPORTANT: Always run in 3ds Max MAXScript Editor or Listener
+-- Press F11 to open MAXScript Editor, or use MAXScript > MAXScript Editor menu
+
+-- Load individual tools (recommended for development)
 filein "TrafficGuideLine.ms"
-filein "VShapeGenerator.ms"
-filein "DashedShape-2.0.0.ms" 
+filein "VShapeGenerator.ms" 
+filein "DashedShape-2.0.0.ms"
 filein "Terrain tool.ms"
 
--- Load all tools at once
-files = getFiles @"C:\path\to\Road-Marking-Tools\*.ms"
+-- Load all tools from current directory
+files = getFiles @"*.ms"
+for f in files do filein f
+
+-- Load from specific path (replace with actual path)
+files = getFiles @"C:\Users\[USER]\Desktop\CJ_HJ\Road-Marking-Tools\*.ms"
 for f in files do filein f
 ```
 
 ### Function Definition Cleanup (Essential before reloading)
 ```maxscript
--- Clear all tool functions before reloading to prevent conflicts
+-- Critical: Clear all tool functions before reloading to prevent conflicts
+-- TrafficGuideLine functions
 try (calculateCenterPath = undefined) catch()
-try (calculateSingleVShapePoints = undefined) catch()
+try (calculateVShapePositions = undefined) catch() 
+try (createVShapeModel = undefined) catch()
+try (analyzeSplineIntersection = undefined) catch()
+try (tgl_calculateSingleVShapePoints = undefined) catch()
+
+-- VShapeGenerator functions  
+try (calculateVShapePoints = undefined) catch()
 try (createVShapeGeometry = undefined) catch()
+try (instanceVShapeOnSpline = undefined) catch()
+try (calculateSingleVShapePoints = undefined) catch()
+
+-- DashedShape functions
 try (calculateDashedSegments = undefined) catch()
+
+-- Terrain Tool functions (prefix: mlpt_)
+try (mlpt_populate_path = undefined) catch()
+
+-- Clear global variables if needed
+try (tgl_previewEnabled = undefined) catch()
+try (vsg_previewEnabled = undefined) catch()
+try (ds_previewEnabled = undefined) catch()
+```
+
+### Quick Development Setup
+```maxscript
+-- Complete development reload sequence (run this block)
+(
+    -- Clear functions
+    try (calculateCenterPath = undefined) catch()
+    try (calculateVShapePoints = undefined) catch()
+    try (calculateDashedSegments = undefined) catch()
+    
+    -- Set working directory (adjust path as needed)
+    setCurrentDir @"C:\Users\[USER]\Desktop\CJ_HJ\Road-Marking-Tools\"
+    
+    -- Load all tools
+    filein "TrafficGuideLine.ms"
+    filein "VShapeGenerator.ms"
+    filein "DashedShape-2.0.0.ms"
+    filein "Terrain tool.ms"
+    
+    print "All tools loaded successfully!"
+)
 ```
 
 ### Testing and Validation
 ```maxscript
--- Test TrafficGuideLine with sample splines
-spline1 = $Line001  -- Select first boundary spline
-spline2 = $Line002  -- Select second boundary spline
+-- Create test splines for TrafficGuideLine
+-- Method 1: Use existing splines in scene
+spline1 = $Line001  -- Select first boundary spline by name
+spline2 = $Line002  -- Select second boundary spline by name
 tgl_selectedSplines = #(spline1, spline2)
 tgl_previewEnabled = true  -- Enable preview mode
 
--- Test VShapeGenerator on selected spline
-vsg_selectedSpline = selection[1]  -- Use currently selected spline
-vsg_previewEnabled = true
+-- Method 2: Use current selection
+if selection.count >= 2 then (
+    tgl_selectedSplines = #(selection[1], selection[2])
+    tgl_previewEnabled = true
+    print ("Selected splines: " + selection[1].name + ", " + selection[2].name)
+) else (
+    print "Please select at least 2 spline objects"
+)
+
+-- Test VShapeGenerator on selected spline  
+if selection.count > 0 then (
+    vsg_selectedSpline = selection[1]  -- Use first selected spline
+    vsg_previewEnabled = true
+    print ("Testing V-Shape on: " + selection[1].name)
+) else (
+    print "Please select a spline object first"
+)
+
+-- Test DashedShape
+if selection.count > 0 then (
+    ds_selectedObjs = #(selection[1])
+    ds_previewEnabled = true
+    print ("Testing Dashed Shape on: " + selection[1].name)
+)
+
+-- Quick validation check
+fn validateSplineInputs splines =
+(
+    for s in splines do (
+        if s == undefined then (
+            print "ERROR: Undefined spline found"
+            return false
+        )
+        if not isKindOf s Shape then (
+            print ("ERROR: Object " + s.name + " is not a Shape/Spline")
+            return false  
+        )
+    )
+    print "All spline inputs are valid"
+    return true
+)
 ```
 
 ## Architecture
@@ -180,3 +267,57 @@ try (functionName = undefined) catch()
 - `中心线生成算法文档.md`: Detailed algorithm analysis with mathematical explanations
 - Contains algorithmic deep-dive into center path calculation, V-shape positioning, and geometric generation methods
 - Essential reference for understanding the mathematical foundations of the traffic guide line generation
+
+## Common Issues and Solutions
+
+### MAXScript Environment Issues
+
+**Problem**: "Cannot open file" or "filein" errors
+```maxscript
+-- Solution 1: Verify file path and set current directory
+print (getCurrentDir())  -- Check current directory
+setCurrentDir @"C:\path\to\Road-Marking-Tools\"  -- Set correct path
+
+-- Solution 2: Use absolute paths
+filein @"C:\full\path\to\TrafficGuideLine.ms"
+```
+
+**Problem**: Function conflicts or "already defined" warnings
+```maxscript
+-- Solution: Clear functions before reloading (as shown above)
+try (calculateCenterPath = undefined) catch()
+-- Or restart 3ds Max for complete cleanup
+```
+
+**Problem**: Preview callbacks not cleaning up properly
+```maxscript
+-- Solution: Manual cleanup of all viewport callbacks
+unregisterRedrawViewsCallback id:#TrafficGuidePreview
+unregisterRedrawViewsCallback id:#VShapePreview
+unregisterRedrawViewsCallback id:#DashedShapePreview
+```
+
+### Geometry Generation Issues
+
+**Problem**: V-shapes not appearing or positioned incorrectly
+- Check that input objects are Shape objects (splines), not geometry
+- Verify splines have proper direction and are not self-intersecting
+- Ensure system units are set correctly (mm recommended)
+- Test with simple Line or Rectangle shapes first
+
+**Problem**: Performance issues with complex splines
+- Reduce preview quality for complex curves (fewer sample points)
+- Use linear interpolation mode in DashedShape for better performance
+- Consider splitting complex splines into simpler segments
+
+### Development Workflow Issues
+
+**Problem**: Changes not taking effect
+- Always clear global variables and function definitions before reloading
+- Check MAXScript Listener for error messages
+- Verify tool dialogs are closed before reloading scripts
+
+**Problem**: Missing dependencies or function not found errors
+- Ensure all required tools are loaded in correct order
+- TrafficGuideLine depends on VShapeGenerator for enhanced calculations
+- Check global variable prefixes to avoid naming conflicts
