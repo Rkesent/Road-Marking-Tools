@@ -1,3 +1,4 @@
+-- 修复后的代码
 -------
 -- DashedShape v2.0.0 - 重构版本
 -- 核心改进：预览和生成使用统一的算法逻辑，确保完全一致
@@ -15,6 +16,8 @@ global ds_useLinear = false
 global ds_mode = 1  -- 1=虚线模式, 2=实线模式
 global ds_offsetDistance = 0  -- 偏移距离
 global ds_translateOffset = false  -- 是否启用平移偏移
+global ds_copyCount = 0  -- 虚线复制数量
+global ds_offsetDirection = 0  -- 偏移方向（-1=左侧，0=双向，1=右侧）
 
 -------
 -- 核心算法：虚线和实线的统一生成逻辑
@@ -25,7 +28,75 @@ global ds_translateOffset = false  -- 是否启用平移偏移
 -- useLinear: 是否使用线性模式
 -- isRealSolid: 是否为真正的实线模式（区别于gapDist=0的连续虚线）
 -------
-fn calculateDashedSegments splineObj splineIdx solidLen gapDist useLinear isRealSolid offsetDist translateOffset =
+
+-------
+-- 公共函数：统一的细分采样逻辑
+-- 抽取重复代码，提供统一的采样接口
+-------
+fn calculateSubdividedPoints splineObj splineIdx subdivisions =
+(
+    local segCount = numSegments splineObj splineIdx
+    local points = #()
+    
+    for segIdx = 1 to segCount do
+    (
+        for subIdx = 1 to subdivisions do
+        (
+            local segStart = (segIdx - 1) as float / segCount as float
+            local segEnd = segIdx as float / segCount as float
+            local param = segStart + (subIdx - 1) as float * (segEnd - segStart) / subdivisions as float
+            
+            local pos = lengthInterp splineObj splineIdx param
+            append points pos
+        )
+    )
+    
+    -- 添加最后一个点
+    append points (lengthInterp splineObj splineIdx 1.0)
+    return points
+)
+
+-------
+-- 公共函数：计算细分段的边界点对
+-- 用于平面生成和带宽线条绘制
+-------
+fn calculateSubdividedBoundaryPairs splineObj splineIdx subdivisions halfWidth =
+(
+    local segCount = numSegments splineObj splineIdx
+    local leftVerts = #()
+    local rightVerts = #()
+    
+    for segIdx = 1 to segCount do
+    (
+        for subIdx = 1 to subdivisions do
+        (
+            local segStart = (segIdx - 1) as float / segCount as float
+            local segEnd = segIdx as float / segCount as float
+            local subStart = segStart + (subIdx - 1) as float * (segEnd - segStart) / subdivisions as float
+            local subEnd = segStart + subIdx as float * (segEnd - segStart) / subdivisions as float
+            
+            local startPos = lengthInterp splineObj splineIdx subStart
+            local endPos = lengthInterp splineObj splineIdx subEnd
+            
+            local segmentDir = normalize (endPos - startPos)
+            local perpDir = normalize (cross segmentDir [0,0,1])
+            
+            -- 只在第一次添加起始点
+            if segIdx == 1 and subIdx == 1 then
+            (
+                append leftVerts (startPos - perpDir * halfWidth)
+                append rightVerts (startPos + perpDir * halfWidth)
+            )
+            
+            -- 总是添加结束点
+            append leftVerts (endPos - perpDir * halfWidth)
+            append rightVerts (endPos + perpDir * halfWidth)
+        )
+    )
+    
+    return #(leftVerts, rightVerts)
+)
+fn calculateDashedSegments splineObj splineIdx solidLen gapDist useLinear isRealSolid offsetDist translateOffset copyCount offsetDirection =
 (
     local result = #()
     local splineLength = curveLength splineObj splineIdx
@@ -34,43 +105,10 @@ fn calculateDashedSegments splineObj splineIdx solidLen gapDist useLinear isReal
     (
         if isRealSolid then
         (
-            -- 实线模式：基于样条线本身结构生成连续线段
-            if useLinear then
-            (
-                -- 线性模式：按样条线的节点数量分段
-                local knotCount = numKnots splineObj splineIdx
-                if knotCount >= 2 then
-                (
-                    for knotIdx = 1 to (knotCount - 1) do
-                    (
-                        local startParam = (knotIdx - 1) as float / (knotCount - 1) as float
-                        local endParam = knotIdx as float / (knotCount - 1) as float
-                        
-                        local startPos = lengthInterp splineObj splineIdx startParam
-                        local endPos = lengthInterp splineObj splineIdx endParam
-                        
-                        append result #(startPos, endPos)
-                    )
-                )
-            )
-            else
-            (
-                -- 弧度模式：根据样条线的曲率自适应采样
-                local segCount = numSegments splineObj splineIdx
-                if segCount > 0 then
-                (
-                    for segIdx = 1 to segCount do
-                    (
-                        local startParam = (segIdx - 1) as float / segCount as float
-                        local endParam = segIdx as float / segCount as float
-                        
-                        local startPos = lengthInterp splineObj splineIdx startParam
-                        local endPos = lengthInterp splineObj splineIdx endParam
-                        
-                        append result #(startPos, endPos)
-                    )
-                )
-            )
+            -- 实线模式：保持原始样条线的完整曲线特征
+            -- 在实线模式下，我们不需要分段，而是直接返回特殊标记
+            -- 让generateDashedShape函数直接复制原始样条线
+            append result #("COPY_ORIGINAL_SPLINE", splineIdx)
         )
         else if gapDist <= 0.001 then
         (
@@ -143,54 +181,166 @@ fn calculateDashedSegments splineObj splineIdx solidLen gapDist useLinear isReal
         )
     )
     
-    -- 应用偏移处理
-    if offsetDist != 0 and result.count > 0 then
+    -- 应用偏移处理（支持复制功能）
+    if offsetDist != 0 and result.count > 0 and translateOffset then
     (
+        local allCopies = #()  -- 存储所有复制的结果
+        
+        -- 如果copyCount为0，直接偏移原始线段
+        if copyCount == 0 then
+        (
+            for i = 1 to result.count do
+            (
+                local segment = result[i]
+                if segment[1] != "COPY_ORIGINAL_SPLINE" then
+                (
+                    local startPos = segment[1]
+                    local endPos = segment[2]
+                    
+                    local segmentDir = normalize (endPos - startPos)
+                    local perpDir = normalize (cross segmentDir [0,0,1])
+                    
+                    -- 根据方向参数调整偏移向量
+                    if offsetDirection == 0 then
+                    (
+                        -- 中间按钮：同时向两边偏移（双向偏移）
+                        local leftOffsetVector = perpDir * (-offsetDist)
+                        local rightOffsetVector = perpDir * offsetDist
+                        
+                        -- 左侧偏移
+                        local leftStartPos = startPos + leftOffsetVector
+                        local leftEndPos = endPos + leftOffsetVector
+                        result[i] = #(leftStartPos, leftEndPos)
+                        
+                        -- 右侧偏移（添加新的线段）
+                        local rightStartPos = startPos + rightOffsetVector
+                        local rightEndPos = endPos + rightOffsetVector
+                        append result #(rightStartPos, rightEndPos)
+                    )
+                    else
+                    (
+                        -- 单向偏移（左或右）
+                        local directionMultiplier = case offsetDirection of
+                        (
+                            (-1): -1.0  -- 左侧
+                            1: 1.0      -- 右侧
+                            default: 1.0
+                        )
+                        
+                        -- 平移偏移：线段沿垂直方向偏移
+                        local offsetVector = perpDir * (offsetDist * directionMultiplier)
+                        local newStartPos = startPos + offsetVector
+                        local newEndPos = endPos + offsetVector
+                        
+                        result[i] = #(newStartPos, newEndPos)
+                    )
+                )
+            )
+        )
+        else
+        (
+            -- 复制模式：保留原始线段，生成偏移的复制
+            -- 首先保留原始线段
+            for segment in result do
+                append allCopies segment
+            
+            -- 生成复制的偏移线段
+            for copyIdx = 1 to copyCount do
+            (
+                local multiplier = if copyIdx == 1 then 1.0 else copyIdx  -- 第一次复制使用1倍距离，后续使用倍数距离
+                
+                for segment in result do
+                (
+                    if segment[1] != "COPY_ORIGINAL_SPLINE" then
+                    (
+                        local startPos = segment[1]
+                        local endPos = segment[2]
+                        
+                        local segmentDir = normalize (endPos - startPos)
+                        local perpDir = normalize (cross segmentDir [0,0,1])
+                        
+                        -- 根据方向参数调整偏移向量
+                        if offsetDirection == 0 then
+                        (
+                            -- 中间按钮：同时向两边偏移（双向偏移）
+                            local leftOffsetVector = perpDir * (-offsetDist * multiplier)
+                            local rightOffsetVector = perpDir * (offsetDist * multiplier)
+                            
+                            -- 左侧偏移
+                            local leftStartPos = startPos + leftOffsetVector
+                            local leftEndPos = endPos + leftOffsetVector
+                            append allCopies #(leftStartPos, leftEndPos)
+                            
+                            -- 右侧偏移
+                            local rightStartPos = startPos + rightOffsetVector
+                            local rightEndPos = endPos + rightOffsetVector
+                            append allCopies #(rightStartPos, rightEndPos)
+                        )
+                        else
+                        (
+                            -- 单向偏移（左或右）
+                            local directionMultiplier = case offsetDirection of
+                            (
+                                (-1): -1.0  -- 左侧
+                                1: 1.0      -- 右侧
+                                default: 1.0
+                            )
+                            
+                            -- 计算偏移向量（使用倍数和方向）
+                            local offsetVector = perpDir * (offsetDist * multiplier * directionMultiplier)
+                            local newStartPos = startPos + offsetVector
+                            local newEndPos = endPos + offsetVector
+                            
+                            append allCopies #(newStartPos, newEndPos)
+                        )
+                    )
+                    else
+                    (
+                        -- 对实线模式的特殊处理
+                        append allCopies segment
+                    )
+                )
+            )
+            
+            -- 用所有复制替换原始结果
+            result = allCopies
+        )
+    )
+    else if offsetDist != 0 and result.count > 0 and not translateOffset then
+    (
+        -- 旋转偏移模式（保持原有逻辑）
         for i = 1 to result.count do
         (
             local segment = result[i]
-            local startPos = segment[1]
-            local endPos = segment[2]
-            
-            -- 计算线段方向和垂直方向
-            local segmentDir = normalize (endPos - startPos)
-            local perpDir = normalize (cross segmentDir [0,0,1])
-            
-            if translateOffset then
-             (
-                 -- 平移偏移：线段沿垂直方向偏移
-                 local offsetVector = perpDir * offsetDist
-                 local newStartPos = startPos + offsetVector
-                 local newEndPos = endPos + offsetVector
-                 
-                 result[i] = #(newStartPos, newEndPos)
-             )
-             else
-             (
-                 -- 旋转偏移：线段绕中心点旋转（默认模式）
-                 local centerPos = (startPos + endPos) / 2.0
-                 local segmentLength = distance startPos endPos
-                 
-                 -- 将偏移距离乘以100后作为旋转角度（度数）
-                 local rotAngleRad = degToRad (offsetDist * 100.0)
-                 
-                 -- 计算线段的原始方向向量
-                 local originalDir = normalize (endPos - startPos)
-                 
-                 -- 应用Z轴旋转：顺时针为正值，逆时针为负值
-                 local cosAngle = cos rotAngleRad
-                 local sinAngle = sin rotAngleRad
-                 local rotatedDir = [originalDir.x * cosAngle - originalDir.y * sinAngle,
-                                    originalDir.x * sinAngle + originalDir.y * cosAngle,
-                                    originalDir.z]
-                 
-                 -- 计算旋转后的新端点位置
-                 local halfSegment = rotatedDir * (segmentLength / 2.0)
-                 local newStartPos = centerPos - halfSegment
-                 local newEndPos = centerPos + halfSegment
-                 
-                 result[i] = #(newStartPos, newEndPos)
-             )
+            if segment[1] != "COPY_ORIGINAL_SPLINE" then
+            (
+                local startPos = segment[1]
+                local endPos = segment[2]
+                
+                -- 旋转偏移：线段绕中心点旋转（默认模式）
+                local centerPos = (startPos + endPos) / 2.0
+                local segmentLength = distance startPos endPos
+                
+                -- 将偏移距离乘以100后作为旋转角度（度数）
+                local rotAngleRad = degToRad (offsetDist * 100.0)
+                
+                -- 计算线段的原始方向向量
+                local originalDir = normalize (endPos - startPos)
+                
+                -- 应用Z轴旋转：顺时针为正值，逆时针为负值
+                local cosAngle = cos rotAngleRad
+                local sinAngle = sin rotAngleRad
+                local rotatedDir = [originalDir.x * cosAngle - originalDir.y * sinAngle,
+                                   originalDir.x * sinAngle + originalDir.y * cosAngle,
+                                   originalDir.z]
+                
+                -- 计算旋转后的新端点位置
+                local halfSegment = rotatedDir * (segmentLength / 2.0)
+                local newStartPos = centerPos - halfSegment
+                local newEndPos = centerPos + halfSegment
+                
+                result[i] = #(newStartPos, newEndPos)
+            )
         )
     )
     
@@ -214,14 +364,81 @@ fn drawDashedPreview objs solidLen gapLen lineWidth lineThickness generatePlane 
                 for splineIdx = 1 to numSplines obj do
                 (
                     -- 使用统一的核心算法计算线段位置
-                    local segments = calculateDashedSegments obj splineIdx solidLen gapLen useLinear isRealSolid ds_offsetDistance ds_translateOffset
+                    local segments = calculateDashedSegments obj splineIdx solidLen gapLen useLinear isRealSolid ds_offsetDistance ds_translateOffset ds_copyCount ds_offsetDirection
                     local halfWidth = if lineWidth > 0 then lineWidth / 2.0 else 0.5
                     
-                    -- 绘制每个线段
+                    -- 绘制每个线段或原始样条线
                     for segment in segments do
                     (
-                        local startPos = segment[1]
-                        local endPos = segment[2]
+                        if segment[1] == "COPY_ORIGINAL_SPLINE" then
+                        (
+                            -- 实线模式：使用统一的采样函数
+                            local sourceSplineIdx = segment[2]
+                            local subdivisions = 3  -- 预览用的细分级别
+                            
+                            -- 使用公共函数获取所有采样点
+                            local allPoints = calculateSubdividedPoints obj sourceSplineIdx subdivisions
+                        
+                        if generatePlane then
+                        (
+                            -- 绘制平面预览：使用统一的边界计算函数
+                            local boundaryPairs = calculateSubdividedBoundaryPairs obj sourceSplineIdx subdivisions halfWidth
+                            local leftPoints = boundaryPairs[1]
+                            local rightPoints = boundaryPairs[2]
+                            
+                            -- 绘制左右边界线
+                            if leftPoints.count > 1 then
+                                gw.polyline leftPoints false
+                            if rightPoints.count > 1 then
+                                gw.polyline rightPoints false
+                            
+                            -- 绘制所有顶点的竖向连接线
+                            if leftPoints.count > 0 and rightPoints.count > 0 then
+                            (
+                                for i = 1 to leftPoints.count do
+                                (
+                                    gw.polyline #(leftPoints[i], rightPoints[i]) false
+                                )
+                            )
+                        )
+                        else
+                        (
+                            -- 绘制线条预览
+                            if lineWidth > 0 or lineThickness > 0 then
+                            (
+                                -- 使用统一的边界计算函数
+                                local boundaryPairs = calculateSubdividedBoundaryPairs obj sourceSplineIdx subdivisions halfWidth
+                                local leftPoints = boundaryPairs[1]
+                                local rightPoints = boundaryPairs[2]
+                                
+                                -- 绘制左右边界线
+                                if leftPoints.count > 1 then
+                                    gw.polyline leftPoints false
+                                if rightPoints.count > 1 then
+                                    gw.polyline rightPoints false
+                                
+                                -- 绘制所有顶点的竖向连接线
+                                if leftPoints.count > 0 and rightPoints.count > 0 then
+                                (
+                                    for i = 1 to leftPoints.count do
+                                    (
+                                        gw.polyline #(leftPoints[i], rightPoints[i]) false
+                                    )
+                                )
+                            )
+                            else
+                            (
+                                -- 简单线条预览：直接绘制连续线条
+                                if allPoints.count > 1 then
+                                    gw.polyline allPoints false
+                            )
+                        )
+                        )
+                        else
+                        (
+                            -- 虚线模式：绘制线段
+                            local startPos = segment[1]
+                            local endPos = segment[2]
                         
                         if generatePlane then
                         (
@@ -276,6 +493,7 @@ fn drawDashedPreview objs solidLen gapLen lineWidth lineThickness generatePlane 
                                 gw.polyline #(startPos, endPos) false
                             )
                         )
+                        )
                     )
                 )
             )
@@ -296,48 +514,49 @@ fn drawDashedPreview objs solidLen gapLen lineWidth lineThickness generatePlane 
 -- 生成函数：创建实际的几何体
 -------
 
--- 创建平面几何体的函数
+-- 创建平面几何体的函数（优化弧度处理 + 顶点焊接）
 fn createPlaneFromSpline sourceSpline planeWidth =
 (
     try
     (
         local verts = #()
         local faces = #()
-        local vertIndex = 1
         
         for splineIdx = 1 to numSplines sourceSpline do
         (
-            local segCount = numSegments sourceSpline splineIdx
             local halfWidth = planeWidth / 2.0
+            local subdivisions = 4  -- 每个原始段细分为4段
             
-            for segIdx = 1 to segCount do
+            -- 使用统一的边界计算函数
+            local boundaryPairs = calculateSubdividedBoundaryPairs sourceSpline splineIdx subdivisions halfWidth
+            local leftVerts = boundaryPairs[1]
+            local rightVerts = boundaryPairs[2]
+            
+            -- 将左右顶点添加到总顶点数组中
+            local startVertIndex = verts.count + 1
+            for i = 1 to leftVerts.count do
             (
-                local startParam = (segIdx - 1) as float / segCount as float
-                local endParam = segIdx as float / segCount as float
+                append verts leftVerts[i]
+                append verts rightVerts[i]
+            )
+            
+            -- 创建面片（连接相邻的顶点对）
+            -- 顶点存储格式：left1, right1, left2, right2, left3, right3, ...
+            for i = 1 to (leftVerts.count - 1) do
+            (
+                -- 计算当前和下一个顶点对的索引
+                local currentLeftIndex = startVertIndex + (i - 1) * 2      -- 当前左顶点
+                local currentRightIndex = startVertIndex + (i - 1) * 2 + 1  -- 当前右顶点
+                local nextLeftIndex = startVertIndex + i * 2               -- 下一个左顶点
+                local nextRightIndex = startVertIndex + i * 2 + 1          -- 下一个右顶点
                 
-                local startPos = lengthInterp sourceSpline splineIdx startParam
-                local endPos = lengthInterp sourceSpline splineIdx endParam
-                
-                local segmentDir = normalize (endPos - startPos)
-                local perpDir = normalize (cross segmentDir [0,0,1])
-                
-                local v1 = startPos - perpDir * halfWidth
-                local v2 = startPos + perpDir * halfWidth
-                local v3 = endPos + perpDir * halfWidth
-                local v4 = endPos - perpDir * halfWidth
-                
-                append verts v1
-                append verts v2
-                append verts v3
-                append verts v4
-                
-                local face1 = [vertIndex, vertIndex+1, vertIndex+2]
-                local face2 = [vertIndex, vertIndex+2, vertIndex+3]
+                -- 创建四边形的两个三角形面
+                -- 顶点顺序：当前左、当前右、下一个右、下一个左
+                local face1 = [currentLeftIndex, currentRightIndex, nextRightIndex]  -- 左下、右下、右上
+                local face2 = [currentLeftIndex, nextRightIndex, nextLeftIndex]      -- 左下、右上、左上
                 
                 append faces face1
                 append faces face2
-                
-                vertIndex += 4
             )
         )
         
@@ -371,18 +590,46 @@ fn generateDashedShape sourceObj solidLen gapLen lineWidth lineThickness generat
     for splineIdx = 1 to numSplines newObj do
     (
         -- 使用与预览完全相同的核心算法
-        local segments = calculateDashedSegments newObj splineIdx solidLen gapLen useLinear isRealSolid ds_offsetDistance ds_translateOffset
+        local segments = calculateDashedSegments newObj splineIdx solidLen gapLen useLinear isRealSolid ds_offsetDistance ds_translateOffset ds_copyCount ds_offsetDirection
         
-        -- 为每个线段创建样条线
+        -- 处理线段或原始样条线复制
         for segment in segments do
         (
-            local startPos = segment[1]
-            local endPos = segment[2]
-            
-            addNewSpline resultShape
-            local currentSplineIdx = numSplines resultShape
-            addKnot resultShape currentSplineIdx #corner #line startPos
-            addKnot resultShape currentSplineIdx #corner #line endPos
+            if segment[1] == "COPY_ORIGINAL_SPLINE" then
+            (
+                -- 实线模式：直接复制原始样条线的完整结构
+                local sourceSplineIdx = segment[2]
+                addNewSpline resultShape
+                local targetSplineIdx = numSplines resultShape
+                
+                -- 复制所有节点及其属性
+                local knotCount = numKnots newObj sourceSplineIdx
+                for knotIdx = 1 to knotCount do
+                (
+                    local knotPos = getKnotPoint newObj sourceSplineIdx knotIdx
+                    local knotType = getKnotType newObj sourceSplineIdx knotIdx
+                    local inVec = getInVec newObj sourceSplineIdx knotIdx
+                    local outVec = getOutVec newObj sourceSplineIdx knotIdx
+                    
+                    addKnot resultShape targetSplineIdx #corner #line knotPos
+                    setInVec resultShape targetSplineIdx knotIdx inVec
+                    setOutVec resultShape targetSplineIdx knotIdx outVec
+                )
+                
+                -- 设置样条线的封闭状态
+                close resultShape targetSplineIdx (isClosed newObj sourceSplineIdx)
+            )
+            else
+            (
+                -- 虚线模式：创建线段
+                local startPos = segment[1]
+                local endPos = segment[2]
+                
+                addNewSpline resultShape
+                local currentSplineIdx = numSplines resultShape
+                addKnot resultShape currentSplineIdx #corner #line startPos
+                addKnot resultShape currentSplineIdx #corner #line endPos
+            )
         )
     )
     
@@ -402,15 +649,19 @@ fn generateDashedShape sourceObj solidLen gapLen lineWidth lineThickness generat
             return planeObj
         )
     )
-    else if lineWidth > 0 or lineThickness > 0 then
+    else
     (
-        -- 设置渲染属性
+        -- 设置渲染属性（包括实线和虚线模式）
         resultShape.render_renderable = true
         resultShape.render_displayRenderMesh = true
         resultShape.render_rectangular = true
         resultShape.render_viewport_rectangular = true
-        resultShape.render_width = lineWidth
-        resultShape.render_length = lineThickness
+        
+        -- 确保宽度和厚度设置正确应用
+        if lineWidth > 0 then
+            resultShape.render_width = lineWidth
+        if lineThickness > 0 then
+            resultShape.render_length = lineThickness
     )
     
     return resultShape
@@ -467,11 +718,15 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
     spinner 'spn3' "线条宽度：" pos:[17,132] width:135 height:20 range:[0,10000,40] type:#worldunits scale:0.01
     spinner 'spn4' "线条厚度：" pos:[17,157] width:135 height:20 range:[0,10000,0] type:#worldunits scale:0.01
     spinner 'spnOffset' "旋转角度：" pos:[17,182] width:135 height:20 range:[-360,360,0] type:#float scale:1.0
+    spinner 'spnCopyCount' "" pos:[155,182] width:30 height:20 range:[0,10,0] type:#integer visible:false
     checkbox 'onLinear' "线性" pos:[10,207] width:40 height:22 align:#left
     checkbox 'chkPlane' "生成平面" pos:[80,207] width:70 height:22 align:#left
     checkbox 'chkRotateOffset' "平移偏移" pos:[10,232] width:70 height:22 align:#left
     checkbox 'chkPreview' "显示预览" pos:[80,232] width:70 height:22 align:#left
     checkbox 'chkQuadify' "四边形化" pos:[10,257] width:70 height:22 align:#left
+    button 'btnOffsetLeft' "<" pos:[120,257] width:20 height:22 align:#left visible:false
+    button 'btnOffsetCenter' "-" pos:[143,257] width:25 height:22 align:#left visible:false
+    button 'btnOffsetRight' ">" pos:[171,257] width:20 height:22 align:#left visible:false
     spinner 'spnQuadSize' "" pos:[80,262] width:30 height:22 range:[1,100,20] type:#integer
     
     groupBox 'grp2' "预设" pos:[8,292] width:189 height:130 align:#left
@@ -498,6 +753,10 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
             ds_lineWidth = spn3.value
             ds_lineThickness = spn4.value
             ds_useLinear = onLinear.checked
+            ds_offsetDistance = spnOffset.value
+            ds_translateOffset = chkRotateOffset.checked
+            ds_copyCount = spnCopyCount.value  -- 更新复制数量
+            -- ds_offsetDirection 已经在按钮事件中更新
             redrawviews()
         )
     )
@@ -514,6 +773,23 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
                 spn2.enabled = true
                 spn3.caption = "线条宽度："
                 ds_mode = 1
+                
+                -- 显示虚线预设按钮，隐藏实线预设按钮，并重新排列位置
+                btnPreset1.visible = true
+                btnPreset1.pos = [17,312]
+                btnPreset2.visible = true
+                btnPreset2.pos = [75,312]
+                btnPreset3.visible = true
+                btnPreset3.pos = [133,312]
+                btnPreset4.visible = true
+                btnPreset4.pos = [17,342]
+                btnPreset5.visible = true
+                btnPreset5.pos = [75,342]
+                btnPreset6.visible = true
+                btnPreset6.pos = [133,342]
+                btnPreset7.visible = false
+                btnPreset8.visible = false
+                btnPreset9.visible = false
             )
             2: -- 实线模式
             (
@@ -522,14 +798,42 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
                 spn2.enabled = false  -- 实线模式下不需要采样间隔参数
                 spn3.caption = "线条宽度："
                 ds_mode = 2
+                
+                -- 隐藏虚线预设按钮，显示实线预设按钮，并重新排列位置
+                btnPreset1.visible = false
+                btnPreset2.visible = false
+                btnPreset3.visible = false
+                btnPreset4.visible = false
+                btnPreset5.visible = false
+                btnPreset6.visible = false
+                btnPreset7.visible = true
+                btnPreset7.pos = [17,312]
+                btnPreset8.visible = true
+                btnPreset8.pos = [75,312]
+                btnPreset9.visible = true
+                btnPreset9.pos = [133,312]
             )
         )
         
         -- 根据偏移模式更新偏移参数的标签
         if chkRotateOffset.checked then
+        (
             spnOffset.caption = "偏移距离："
+            spnCopyCount.visible = true   -- 平移模式显示复制数量输入框
+            -- 显示方向控制按钮
+            btnOffsetLeft.visible = true
+            btnOffsetCenter.visible = true
+            btnOffsetRight.visible = true
+        )
         else
+        (
             spnOffset.caption = "旋转角度："
+            spnCopyCount.visible = false  -- 旋转模式隐藏复制数量输入框
+            -- 隐藏方向控制按钮
+            btnOffsetLeft.visible = false
+            btnOffsetCenter.visible = false
+            btnOffsetRight.visible = false
+        )
         
         -- 同步偏移参数到全局变量
         ds_offsetDistance = spnOffset.value
@@ -562,6 +866,14 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
         ds_useLinear = onLinear.checked
         ds_offsetDistance = spnOffset.value
         ds_translateOffset = chkRotateOffset.checked
+        ds_copyCount = spnCopyCount.value
+        
+        -- 初始化方向按钮状态（默认双向偏移）
+        ds_offsetDirection = 0
+        -- 使用文本来表示按钮状态
+        btnOffsetLeft.text = "<"      -- 未选中
+        btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+        btnOffsetRight.text = ">"     -- 未选中
         
         -- 最后调用UI状态更新（此时所有控件都已初始化）
         updateUIState()
@@ -598,49 +910,7 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
     on spn4 changed val do updatePreview()
     on onLinear changed state do updatePreview()
     
-    -- 鼠标滚轮控制事件
-    on spn1 mouseWheel delta do
-    (
-        local step = 50  -- 虚线长度步长
-        spn1.value = spn1.value + (if delta > 0 then step else -step)
-        updatePreview()
-    )
-    
-    on spn2 mouseWheel delta do
-    (
-        local step = 50  -- 采样间隔步长
-        spn2.value = spn2.value + (if delta > 0 then step else -step)
-        updatePreview()
-    )
-    
-    on spn3 mouseWheel delta do
-    (
-        local step = 10  -- 线条宽度步长
-        spn3.value = spn3.value + (if delta > 0 then step else -step)
-        updatePreview()
-    )
-    
-    on spn4 mouseWheel delta do
-    (
-        local step = 5   -- 线条厚度步长
-        spn4.value = spn4.value + (if delta > 0 then step else -step)
-        updatePreview()
-    )
-    
-    on spnOffset mouseWheel delta do
-    (
-        local step = if ds_translateOffset then 50 else 0.05  -- 平移模式50，旋转模式0.05（相当于5度）
-        spnOffset.value = spnOffset.value + (if delta > 0 then step else -step)
-        ds_offsetDistance = spnOffset.value
-        if ds_previewEnabled and selection.count > 0 then
-            updatePreview()
-    )
-    
-    on spnQuadSize mouseWheel delta do
-    (
-        local step = 1   -- 四边形化大小步长
-        spnQuadSize.value = spnQuadSize.value + (if delta > 0 then step else -step)
-    )
+
     
     on chkPlane changed state do
     (
@@ -663,6 +933,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn1.value = 200
          spn2.value = 600
          spn3.value = 30
+         spn4.value = 0     -- 明确设置厚度为0
+         spnOffset.value = 0 -- 明确设置偏移为0
+         spnCopyCount.value = 0 -- 明确设置复制数量为0
+         onLinear.checked = false -- 明确设置线性模式
+         chkRotateOffset.checked = false -- 明确设置偏移模式
          chkPlane.checked = true
          chkPreview.checked = true
          chkQuadify.checked = true
@@ -670,6 +945,12 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         -- 重置方向控制
+         ds_offsetDirection = 0
+         btnOffsetLeft.text = "<"      -- 未选中
+         btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+         btnOffsetRight.text = ">"     -- 未选中
          
          updateUIState()
          
@@ -689,6 +970,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn1.value = 50
          spn2.value = 101
          spn3.value = 520
+         spn4.value = 0     -- 明确设置厚度为0
+         spnOffset.value = 0 -- 明确设置偏移为0
+         spnCopyCount.value = 0 -- 明确设置复制数量为0
+         onLinear.checked = false -- 明确设置线性模式
+         chkRotateOffset.checked = false -- 明确设置偏移模式
          chkPlane.checked = true
          chkPreview.checked = true
          chkQuadify.checked = true
@@ -696,6 +982,12 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         -- 重置方向控制
+         ds_offsetDirection = 0
+         btnOffsetLeft.text = "<"      -- 未选中
+         btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+         btnOffsetRight.text = ">"     -- 未选中
          
          updateUIState()
          
@@ -715,6 +1007,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn1.value = 620
          spn2.value = 1510
          spn3.value = 30
+         spn4.value = 0     -- 明确设置厚度为0
+         spnOffset.value = 0 -- 明确设置偏移为0
+         spnCopyCount.value = 0 -- 明确设置复制数量为0
+         onLinear.checked = false -- 明确设置线性模式
+         chkRotateOffset.checked = false -- 明确设置偏移模式
          chkPlane.checked = true
          chkPreview.checked = true
          chkQuadify.checked = true
@@ -722,6 +1019,12 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         -- 重置方向控制
+         ds_offsetDirection = 0
+         btnOffsetLeft.text = "<"      -- 未选中
+         btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+         btnOffsetRight.text = ">"     -- 未选中
          
          updateUIState()
          
@@ -741,6 +1044,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn1.value = 100
          spn2.value = 200
          spn3.value = 50
+         spn4.value = 0     -- 明确设置厚度为0
+         spnOffset.value = 0 -- 明确设置偏移为0
+         spnCopyCount.value = 0 -- 明确设置复制数量为0
+         onLinear.checked = false -- 明确设置线性模式
+         chkRotateOffset.checked = false -- 明确设置偏移模式
          chkPlane.checked = true
          chkPreview.checked = true
          chkQuadify.checked = true
@@ -748,6 +1056,12 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         -- 重置方向控制
+         ds_offsetDirection = 0
+         btnOffsetLeft.text = "<"      -- 未选中
+         btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+         btnOffsetRight.text = ">"     -- 未选中
          
          updateUIState()
          
@@ -767,6 +1081,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn1.value = 100
          spn2.value = 200
          spn3.value = 25
+         spn4.value = 0     -- 明确设置厚度为0
+         spnOffset.value = 0 -- 明确设置偏移为0
+         spnCopyCount.value = 0 -- 明确设置复制数量为0
+         onLinear.checked = false -- 明确设置线性模式
+         chkRotateOffset.checked = false -- 明确设置偏移模式
          chkPlane.checked = true
          chkPreview.checked = true
          chkQuadify.checked = true
@@ -774,6 +1093,12 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         -- 重置方向控制
+         ds_offsetDirection = 0
+         btnOffsetLeft.text = "<"      -- 未选中
+         btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+         btnOffsetRight.text = ">"     -- 未选中
          
          updateUIState()
          
@@ -793,6 +1118,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn1.value = 50
          spn2.value = 90
          spn3.value = 20
+         spn4.value = 0     -- 明确设置厚度为0
+         spnOffset.value = 0 -- 明确设置偏移为0
+         spnCopyCount.value = 0 -- 明确设置复制数量为0
+         onLinear.checked = false -- 明确设置线性模式
+         chkRotateOffset.checked = false -- 明确设置偏移模式
          chkPlane.checked = true
          chkPreview.checked = true
          chkQuadify.checked = true
@@ -800,6 +1130,12 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
          spn4.enabled = false
          chkQuadify.enabled = true
          spnQuadSize.enabled = true
+         
+         -- 重置方向控制
+         ds_offsetDirection = 0
+         btnOffsetLeft.text = "<"      -- 未选中
+         btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+         btnOffsetRight.text = ">"     -- 未选中
          
          updateUIState()
          
@@ -818,6 +1154,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
         -- 实线：连续实线，宽度：100
         rdoMode.state = 2  -- 实线模式
         spn3.value = 100  -- 只设置线条宽度
+        spn4.value = 0     -- 明确设置厚度为0
+        spnOffset.value = 0 -- 明确设置偏移为0
+        spnCopyCount.value = 0 -- 明确设置复制数量为0
+        onLinear.checked = false -- 明确设置线性模式
+        chkRotateOffset.checked = false -- 明确设置偏移模式
         chkPlane.checked = true
         chkPreview.checked = true
         chkQuadify.checked = true
@@ -842,6 +1183,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
         -- 双实线：连续实线，宽度：150
         rdoMode.state = 2  -- 实线模式
         spn3.value = 150  -- 只设置线条宽度
+        spn4.value = 0     -- 明确设置厚度为0
+        spnOffset.value = 0 -- 明确设置偏移为0
+        spnCopyCount.value = 0 -- 明确设置复制数量为0
+        onLinear.checked = false -- 明确设置线性模式
+        chkRotateOffset.checked = false -- 明确设置偏移模式
         chkPlane.checked = true
         chkPreview.checked = true
         chkQuadify.checked = true
@@ -866,6 +1212,11 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
         -- 边界线：连续实线，宽度：200
         rdoMode.state = 2  -- 实线模式
         spn3.value = 200  -- 只设置线条宽度
+        spn4.value = 0     -- 明确设置厚度为0
+        spnOffset.value = 0 -- 明确设置偏移为0
+        spnCopyCount.value = 0 -- 明确设置复制数量为0
+        onLinear.checked = false -- 明确设置线性模式
+        chkRotateOffset.checked = false -- 明确设置偏移模式
         chkPlane.checked = true
         chkPreview.checked = true
         chkQuadify.checked = true
@@ -893,25 +1244,80 @@ rollout DashedShapeRol "DashedShape v2.0.0" width:205 height:470
             updatePreview()
     )
     
+    -- 复制数量变化事件
+    on spnCopyCount changed val do
+    (
+        ds_copyCount = val
+        if ds_previewEnabled and selection.count > 0 then
+            updatePreview()
+    )
+    
     -- 平移偏移复选框变化事件
      on chkRotateOffset changed state do
      (
          ds_translateOffset = state
-         -- 动态更新标签和参数范围
+         
+         -- 控制复制数量输入框的显示/隐藏
+         spnCopyCount.visible = state
+         
+         -- 控制方向按钮的显示/隐藏
+         btnOffsetLeft.visible = state
+         btnOffsetCenter.visible = state
+         btnOffsetRight.visible = state
+         
+         -- 根据项目规范，切换模式时清零值
          if state then
          (
              spnOffset.caption = "偏移距离："
-             spnOffset.range = [-10000,10000,0]
+             spnOffset.range = [-10000,10000,0]  -- 切换到平移模式时清零
+             spnCopyCount.value = 0              -- 清零复制数量
+             ds_offsetDirection = 0              -- 重置为双向偏移
+             -- 设置默认选中双向按钮
+             btnOffsetLeft.text = "<"      -- 未选中
+             btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+             btnOffsetRight.text = ">"     -- 未选中
          )
          else
          (
              spnOffset.caption = "旋转角度："
-             spnOffset.range = [-360,360,0]  
+             spnOffset.range = [-360,360,0]      -- 切换到旋转模式时清零
          )
+         
+         -- 更新全局变量
+         ds_offsetDistance = spnOffset.value
+         ds_copyCount = spnCopyCount.value
          
          if ds_previewEnabled and selection.count > 0 then
              updatePreview()
      )
+     
+    -- 方向控制按钮事件
+    on btnOffsetLeft pressed do
+    (
+        ds_offsetDirection = 1  -- 左侧偏移
+        btnOffsetLeft.text = "[<]"     -- 选中（方括号表示）
+        btnOffsetCenter.text = "↔"     -- 未选中
+        btnOffsetRight.text = ">"     -- 未选中
+        updatePreview()
+    )
+    
+    on btnOffsetCenter pressed do
+    (
+        ds_offsetDirection = 0   -- 双向偏移（同时向两边）
+        btnOffsetLeft.text = "<"      -- 未选中
+        btnOffsetCenter.text = "[↔]"   -- 选中（双向箭头表示双向偏移）
+        btnOffsetRight.text = ">"     -- 未选中
+        updatePreview()
+    )
+    
+    on btnOffsetRight pressed do
+    (
+        ds_offsetDirection = -1   -- 右侧偏移
+        btnOffsetLeft.text = "<"      -- 未选中
+        btnOffsetCenter.text = "↔"     -- 未选中
+        btnOffsetRight.text = "[>]"    -- 选中（方括号表示）
+        updatePreview()
+    )
     
     on genBtn pressed do
     (
